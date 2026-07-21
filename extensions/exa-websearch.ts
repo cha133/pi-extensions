@@ -130,6 +130,18 @@ function summaryLine(theme: any, main: string, stat: string, truncated: boolean)
 	return line;
 }
 
+interface SearchDetails {
+	truncated: boolean;
+	resultCount: number;
+	totalLines: number;
+}
+
+interface FetchDetails {
+	truncated: boolean;
+	urlCount: number;
+	totalLines: number;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "exa_web_search",
@@ -159,8 +171,9 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded, isPartial }, theme, _context) {
 			if (isPartial) return new Text(theme.fg("warning", "Searching..."), 0, 0);
 
-			const count: number = result.details?.resultCount ?? 0;
-			const truncated: boolean = result.details?.truncated ?? false;
+			const details = result.details as SearchDetails | undefined;
+			const count = details?.resultCount ?? 0;
+			const truncated = details?.truncated ?? false;
 			const summary = summaryLine(theme, "Exa", `${count} 条结果`, truncated);
 			if (!expanded) return new Text(summary, 0, 0);
 
@@ -191,7 +204,11 @@ export default function (pi: ExtensionAPI) {
 			const resultCount = (raw.match(/^Title: /gm) || []).length;
 			return {
 				content: [{ type: "text", text: t.content }],
-				details: { truncated: t.truncated, resultCount, totalLines: t.totalLines },
+				details: {
+					truncated: t.truncated,
+					resultCount,
+					totalLines: t.totalLines,
+				} satisfies SearchDetails,
 			};
 		},
 	});
@@ -223,8 +240,9 @@ export default function (pi: ExtensionAPI) {
 		renderResult(result, { expanded, isPartial }, theme, _context) {
 			if (isPartial) return new Text(theme.fg("warning", "Fetching..."), 0, 0);
 
-			const urlCount: number = result.details?.urlCount ?? 0;
-			const truncated: boolean = result.details?.truncated ?? false;
+			const details = result.details as FetchDetails | undefined;
+			const urlCount = details?.urlCount ?? 0;
+			const truncated = details?.truncated ?? false;
 			const summary = summaryLine(theme, "Exa", `fetched ${urlCount} url${urlCount > 1 ? "s" : ""}`, truncated);
 			if (!expanded) return new Text(summary, 0, 0);
 
@@ -257,7 +275,7 @@ export default function (pi: ExtensionAPI) {
 					truncated: t.truncated,
 					urlCount: params.urls.length,
 					totalLines: t.totalLines,
-				},
+				} satisfies FetchDetails,
 			};
 		},
 	});
