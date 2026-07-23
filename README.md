@@ -4,8 +4,10 @@ Personal [pi](https://pi.dev) coding-agent extensions.
 
 | Extension | Tools / behavior |
 |-----------|------------------|
-| `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (no API key) |
-| `pwsh-bash.ts` | Overrides built-in `bash` to run PowerShell 7 |
+| `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
+| `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> LineTrimmed -> WhitespaceNorm -> IndentFlexible -> EscapeNorm -> BlockAnchor), ported from opencode |
+| `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
+| `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
 | `view-image.ts` | `view_image` — MiMo vision for text-only models; hidden when the active model already accepts images |
 
 ## Install
@@ -22,8 +24,10 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 
 | Extension | Notes |
 |-----------|--------|
+| `bash` | PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` (edit the path if needed) |
+| `edit` | None (no extra runtime deps; reuses pi's `diff` package) |
+| `codegraph` | `codegraph` CLI on PATH; a project must be indexed (`codegraph init`) for queries to work |
 | `web-search` | Network access to `https://mcp.exa.ai/mcp` |
-| `pwsh-bash` | PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` (edit the path if needed) |
 | `view-image` | `MIMO_API_KEY` env var; calls `https://api.xiaomimimo.com/v1` with model `mimo-v2.5` |
 
 ## Develop
@@ -39,8 +43,9 @@ npm run typecheck
 
 ```
 pi-extensions/
-├── extensions/          # loaded by pi (package manifest)
-├── package.json         # pi-package + peerDeps
-├── tsconfig.json
-└── README.md
+├── extensions/          # one extension per .ts file, loaded by pi (package manifest)
+├── package.json         # pi-package manifest + peerDeps (runtime) + devDeps (types/tsc)
+├── tsconfig.json        # noEmit; strict; NodeNext; types: ["node"]
+├── AGENTS.md            # agent quick-reference (auto-read by coding agents)
+└── README.md            # this file
 ```
