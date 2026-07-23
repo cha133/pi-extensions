@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
   "version": "1.0.0",
-  "description": "Personal pi coding-agent extensions: Exa search, pwsh bash override, view_image for text-only models",
+  "description": "Personal pi coding-agent extensions: web search via Exa MCP, bash/edit overrides (pwsh7, fuzzy edit), codegraph bridge, view_image for text-only models",
   "type": "module",
   "license": "MIT",
   "repository": {
