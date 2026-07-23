@@ -1,18 +1,21 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 
-// getShellConfig 要求 existsSync 能命中，所以必须用绝对路径，不能写裸 "pwsh.exe"。
+// getShellConfig requires existsSync to succeed, so use an absolute path rather than bare "pwsh.exe".
 const PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
 
 /**
- * 用 pwsh7 覆盖内置 bash 工具：
- * - shellPath 指向 pwsh7（覆盖后内置工具从 settings 读 shellPath 的逻辑不再生效，必须显式传）
- * - spawnHook 注入 TERM=dumb：
- *   1) 触发 $profile 顶部 `if ($env:TERM -eq 'dumb') { return }` 提前返回，
- *      跳过 starship / PSReadLine / zoxide 等交互式初始化，只保留 UTF-8 编码 + mise activate；
- *   2) 让 git / eza 等检测到 dumb 终端，不吐 ANSI 转义。
- * - promptGuidelines 抄自 ~/.agents/AGENTS.md，提醒模型写 pwsh7 语法而非 bash。
- * 其余（execute / 50KB·2000 行截断 / 流式节流 / TUI 渲染 / 超时 / 进程树 kill）全复用内置实现。
+ * Override the built-in bash tool with PowerShell 7:
+ * - shellPath points to pwsh7. Once overridden, the built-in settings lookup no longer
+ *   supplies shellPath, so it must be passed explicitly.
+ * - spawnHook injects TERM=dumb:
+ *   1) The guard at the top of $profile, `if ($env:TERM -eq 'dumb') { return }`, exits
+ *      early. This skips interactive setup such as starship, PSReadLine, and zoxide
+ *      while retaining UTF-8 configuration and mise activation.
+ *   2) Tools such as git and eza detect a dumb terminal and omit ANSI escape sequences.
+ * - promptGuidelines remind the model to write PowerShell 7 rather than bash syntax.
+ * Everything else (execution, 50 KB/2,000-line truncation, stream throttling, TUI
+ * rendering, timeouts, and process-tree termination) reuses the built-in implementation.
  */
 export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
@@ -27,18 +30,18 @@ export default function (pi: ExtensionAPI) {
 
 		pi.registerTool({
 			...base,
-			name: "bash", // 同名覆盖内置 bash 工具（TUI 会显示一条覆盖警告）
+			name: "bash", // Registering the same name overrides the built-in tool; the TUI warns about it.
 			description:
-				"在当前工作目录执行 PowerShell 7 (pwsh) 命令，返回 stdout 和 stderr。" +
-				"输出截断到最后 2000 行或 50KB，超出部分存到临时文件并在结果里给出路径。" +
-				"可提供 timeout（秒）。环境已注入 TERM=dumb；$profile 自动加载，mise 环境与 UTF-8 编码就绪。",
-			promptSnippet: "执行 pwsh7 命令",
+				"Run a PowerShell 7 (pwsh) command in the current working directory and return stdout and stderr. " +
+				"Output is truncated to the last 2,000 lines or 50 KB; overflow is saved to a temporary file whose path is included in the result. " +
+				"An optional timeout may be provided in seconds. TERM=dumb is injected, $profile loads automatically, and mise plus UTF-8 support are ready.",
+			promptSnippet: "Run PowerShell 7 commands",
 			promptGuidelines: [
-				"bash 工具运行的是 pwsh7，写 PowerShell 7 语法，不要写 bash/sh：环境变量用 `$env:NAME = 'x'`（不是 `export`）、行连续用反引号（不是 `\\`）、测试存在用 `Test-Path`（不是 `[ -f ]`）、路径带空格调用 exe 用 `& 'C:\\path\\app.exe' arg`。",
-				"搜索优先用已装的 CLI 而不是 Unix 工具：用 `fd` 找文件（如 `fd -e md` 找所有 markdown，不是 `find`），用 `rg` 搜内容（不是 `grep`/`Select-String`）；截断输出用 `Select-Object -First N` / `-Last N`（不是 `head` / `tail`，也可 `Get-Content -TotalCount N` / `-Tail N`），统计行数用 `(Get-Content f | Measure-Object -Line).Lines`（不是 `wc -l`），查命令路径用 `(Get-Command name).Source`（不是 `which`）。",
-				"给原生 exe 传多行参数（如 git commit message）用 here-string：`@'...'@`（单引号不展开变量）或 `@\"...\"@`（展开变量）；闭合标记 `'@` / `\"@` 必须顶格（行首无缩进），否则报错。",
-				"命令替换用 `$(cmd)`；`&&` / `||` 在 pwsh7 支持；管道传递的是对象不是文本。",
-				"跑 .ps1 用 pwsh.exe（不是 powershell.exe），跑 .sh 用 sh.exe（不是 bash.exe）。",
+				"The bash tool runs pwsh7. Write PowerShell 7 syntax, not bash/sh: set environment variables with `$env:NAME = 'x'` (not `export`), continue lines with a backtick (not `\\`), test paths with `Test-Path` (not `[ -f ]`), and invoke executables whose paths contain spaces with `& 'C:\\path\\app.exe' arg`.",
+				"For searching, prefer the installed CLI tools: use `fd` to find files (for example, `fd -e md` for all Markdown files, not `find`) and `rg` to search content (not `grep` or `Select-String`). Limit output with `Select-Object -First N` / `-Last N` (not `head` / `tail`; `Get-Content -TotalCount N` / `-Tail N` also works), count lines with `(Get-Content f | Measure-Object -Line).Lines` (not `wc -l`), and locate commands with `(Get-Command name).Source` (not `which`).",
+				"Pass multiline arguments to native executables, such as Git commit messages, with a here-string: `@'...'@` does not expand variables, while `@\"...\"@` does. The closing marker `'@` / `\"@` must begin at column 1 or PowerShell will report an error.",
+				"Use `$(cmd)` for command substitution. PowerShell 7 supports `&&` and `||`; pipelines pass objects rather than text.",
+				"Run .ps1 files with pwsh.exe (not powershell.exe) and .sh files with sh.exe (not bash.exe).",
 			],
 		});
 	});

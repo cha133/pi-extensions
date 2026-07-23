@@ -1,32 +1,37 @@
 /**
- * Fuzzy edit -- 覆盖内置 edit 工具，用多策略 fallback 匹配大幅提高命中率。
+ * Fuzzy edit -- override the built-in edit tool with multi-strategy fallback matching.
  *
- * 内置 edit 只有「精确匹配 + 行尾 trim fuzzy」两层，tab/空格混用、缩进级别
- * 不一致、模型把换行写成字面 \n、首尾行对得上但中间略有出入等情况全部匹配失败，
- * 导致 agent 经常转去写临时 node 脚本。这里移植并精简 opencode 的多 Replacer 思路
- * （见 https://github.com/nicepkg/opencode 的 packages/opencode/src/tool/edit.ts）：
+ * The built-in edit tool only tries exact matching and line-trimmed fuzzy matching. It
+ * fails on mixed tabs and spaces, shifted indentation, literal \n sequences emitted by
+ * models, or blocks whose endpoints match but whose middle differs slightly. This ports
+ * and streamlines opencode's multi-Replacer approach (see packages/opencode/src/tool/edit.ts
+ * at https://github.com/nicepkg/opencode):
  *
- *   1. Exact            精确子串
- *   2. LineTrimmed      逐行 trim 后比较（忽略行首尾空白差异）
- *   3. WhitespaceNorm   \s+ 折叠成单空格后比较（tab/多空格/混排）
- *   4. IndentFlexible   去最小公共缩进后比较（整体缩进级别差异）
- *   5. EscapeNorm       反转义字面 \n \t \r 等（模型常见 quirk）
- *   6. BlockAnchor      首尾行做锚点 + 中间行 Levenshtein 相似度（≥0.65），
- *                       多候选取最高分。行数差容忍 ±25%。
+ *   1. Exact            exact substring
+ *   2. LineTrimmed      compare trimmed lines, ignoring leading/trailing whitespace
+ *   3. WhitespaceNorm   collapse \s+ to one space, handling tabs and repeated spaces
+ *   4. IndentFlexible   remove minimum common indentation before comparing
+ *   5. EscapeNorm       unescape literal \n, \t, \r, and similar model quirks
+ *   6. BlockAnchor      anchor on first/last lines and score the middle with Levenshtein
+ *                       similarity (>= 0.65); choose the best candidate and tolerate
+ *                       a line-count difference of up to 25%
  *
- * 每个 Replacer 都 yield 原始 content 的真实子串，保证后续 indexOf 定位精确、
- * 替换不会污染未编辑区域。外层逐个 yield，命中唯一匹配即采用；多匹配则继续试更
- * 严格的策略，全部失败才报 not found / multiple matches。
+ * Every Replacer yields an actual substring from the original content. This preserves
+ * exact indexOf positioning and prevents edits from affecting untouched regions. The
+ * outer loop accepts the first unique match, continues after ambiguous matches, and only
+ * reports not found / multiple matches after all strategies fail.
  *
- * 与 opencode / Claude Code 一样，每次调用只做一个 oldText → newText 替换。多个修改
- * 应拆成多个工具调用，并由 executionMode: "sequential" 串行执行。这样一个匹配失败
- * 不会让同批其他修改一起报废，也避免模型为组装大型 edits[] 长时间规划。
+ * Like opencode and Claude Code, each call performs one oldText -> newText replacement.
+ * Multiple changes should use separate calls, serialized by executionMode: "sequential".
+ * A failed match then does not invalidate unrelated edits, and the model need not spend
+ * time assembling a large edits array.
  *
- * 保留 BOM 与原文件行尾。diff 生成复用与内置 edit-diff.ts 相同的 `diff` 包与相同的
- * 展示格式（带行号、上下文折叠、firstChangedLine 定位），TUI 渲染一致。
+ * Preserve the BOM and the file's original line endings. Diff generation reuses the same
+ * `diff` package and display format as built-in edit-diff.ts, including line numbers,
+ * collapsed context, and firstChangedLine positioning, for consistent TUI rendering.
  *
- * 放 ~/.pi/agent/extensions/ 自动发现；同名 registerTool 覆盖内置 edit。
- * 热重载：会话内用 /reload 即可生效。
+ * Place this file in ~/.pi/agent/extensions/ for auto-discovery. Registering the same
+ * name overrides the built-in edit tool; use /reload to hot-reload it in a session.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -49,7 +54,7 @@ const editSchema = Type.Object({
 });
 
 // ---------------------------------------------------------------------------
-// 行尾 / BOM
+// Line endings and BOM
 // ---------------------------------------------------------------------------
 
 function normalizeToLF(text: string): string {
@@ -77,7 +82,7 @@ function resolvePath(p: string, cwd: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Levenshtein（BlockAnchor 评分用）
+// Levenshtein distance, used by BlockAnchor scoring
 // ---------------------------------------------------------------------------
 
 function levenshtein(a: string, b: string): number {
@@ -95,17 +100,17 @@ function levenshtein(a: string, b: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Replacer：generator，yield 原始 content 的真实子串
+// Replacers are generators that yield actual substrings from the original content.
 // ---------------------------------------------------------------------------
 
 type Replacer = (content: string, find: string) => Generator<string, void, unknown>;
 
-/** 1. 精确匹配。yield find 本身（若 content 含之）。 */
+/** 1. Exact match. Yield find itself when content contains it. */
 const ExactReplacer: Replacer = function* (content, find) {
 	if (content.includes(find)) yield find;
 };
 
-/** 2. 逐行 trim 比较，命中则 yield 原始行块（保留原缩进/空白）。 */
+/** 2. Compare trimmed lines; yield the original block to preserve indentation and whitespace. */
 const LineTrimmedReplacer: Replacer = function* (content, find) {
 	const originalLines = content.split("\n");
 	const searchLines = find.split("\n");
@@ -133,7 +138,7 @@ const LineTrimmedReplacer: Replacer = function* (content, find) {
 	}
 };
 
-/** 3. 所有空白折叠为单空格后比较（tab/多空格/混排）。 */
+/** 3. Compare after collapsing all whitespace to one space. */
 const WhitespaceNormalizedReplacer: Replacer = function* (content, find) {
 	const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 	const normalizedFind = norm(find);
@@ -146,7 +151,7 @@ const WhitespaceNormalizedReplacer: Replacer = function* (content, find) {
 	}
 };
 
-/** 4. 去最小公共缩进后比较（整体缩进级别差异）。 */
+/** 4. Compare after removing minimum common indentation. */
 const IndentationFlexibleReplacer: Replacer = function* (content, find) {
 	const removeIndent = (text: string): string => {
 		const lines = text.split("\n");
@@ -170,7 +175,7 @@ const IndentationFlexibleReplacer: Replacer = function* (content, find) {
 	}
 };
 
-/** 5. 反转义字面 \n \t \r 等（模型常见 quirk）。 */
+/** 5. Unescape literal \n, \t, \r, and similar model quirks. */
 const EscapeNormalizedReplacer: Replacer = function* (content, find) {
 	const unescape = (str: string): string =>
 		str.replace(/\\(n|t|r|'|"|`|\\|\n|\$)/g, (match, captured: string) => {
@@ -211,7 +216,7 @@ const EscapeNormalizedReplacer: Replacer = function* (content, find) {
 
 const BLOCK_ANCHOR_SIMILARITY_THRESHOLD = 0.65;
 
-/** 6. 首尾行锚点 + 中间行 Levenshtein 相似度，多候选取最高分。合并 opencode BlockAnchor + ContextAware。 */
+/** 6. Anchor on first/last lines and choose the candidate with the best middle-line Levenshtein score. */
 const BlockAnchorReplacer: Replacer = function* (content, find) {
 	const findLines = find.split("\n");
 	if (findLines.length < 3) return;
@@ -278,7 +283,7 @@ const BlockAnchorReplacer: Replacer = function* (content, find) {
 };
 
 // ---------------------------------------------------------------------------
-// 安全检查：拒绝匹配到比 oldText 大得多的块（BlockAnchor 等模糊匹配可能误伤）
+// Safety check: reject blocks much larger than oldText because fuzzy strategies may overmatch.
 // ---------------------------------------------------------------------------
 
 function isDisproportionateMatch(search: string, oldString: string): boolean {
@@ -290,7 +295,7 @@ function isDisproportionateMatch(search: string, oldString: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// 核心：对单个 oldText 在 content 中找一个唯一匹配
+// Find one unique match for a single oldText within content.
 // ---------------------------------------------------------------------------
 
 interface Match {
@@ -322,7 +327,7 @@ function findMatch(content: string, oldText: string, path: string): Match {
 				);
 			}
 			const lastIndex = content.lastIndexOf(search);
-			if (index !== lastIndex) continue; // 不唯一，试下一个 yield / 策略
+			if (index !== lastIndex) continue; // Ambiguous: try the next yield or strategy.
 			return { index, length: search.length, strategy: name };
 		}
 	}
@@ -336,18 +341,19 @@ function findMatch(content: string, oldText: string, path: string): Match {
 }
 
 // ---------------------------------------------------------------------------
-// diff 生成：直接复用 pi 内置 edit-diff.ts 的实现（同一组函数），与原生 edit 的
-// TUI 渲染、行号定位、patch 格式逐字一致。pi 已把它们从 @earendil-works/pi-coding-agent
-// 公共包 re-export，扩展通过该包导入即可在 pi 模块上下文运行（diff 包随之可解析）。
+// Diff generation directly reuses Pi's built-in edit-diff.ts helpers. This keeps TUI
+// rendering, line positioning, and patch formatting identical to the native edit tool.
+// Pi re-exports them from @earendil-works/pi-coding-agent so the extension can resolve
+// the helpers and their diff dependency in Pi's module context.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// 工具注册
+// Tool registration
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI): void {
 	pi.registerTool({
-		name: "edit", // 同名覆盖内置 edit
+		name: "edit", // Registering the same name overrides the built-in edit tool.
 		label: "edit",
 		description:
 			"Edit a single file with one targeted text replacement. oldText must identify a unique region. Matching tolerates minor whitespace, indentation, and escaping differences.",
@@ -360,7 +366,7 @@ export default function (pi: ExtensionAPI): void {
 			"Keep oldText as small as possible while still being unique. Do not pad it with large unchanged regions.",
 			"oldText must not be empty and must differ from newText.",
 		],
-		executionMode: "sequential", // 多个独立 edit 工具调用串行，避免同文件并发写冲突
+		executionMode: "sequential", // Serialize calls to avoid concurrent writes to the same file.
 
 		async execute(_toolCallId, input, signal, _onUpdate, ctx) {
 			const args = input as { path?: string; oldText?: string; newText?: string };
@@ -384,7 +390,7 @@ export default function (pi: ExtensionAPI): void {
 			};
 			throwIfAborted();
 
-			// 校验可读写
+			// Verify that the file is readable and writable.
 			try {
 				await access(absolutePath, constants.R_OK | constants.W_OK);
 			} catch (error: unknown) {

@@ -12,12 +12,12 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 
 /**
- * view_image -- 给纯文本模型补视觉能力（参考 mcp-sight）。
+ * view_image -- add vision support for text-only models (inspired by mcp-sight).
  *
- * - baseUrl / model 写死：Xiaomi MiMo OpenAI-compatible 端点
- * - apiKey 从 MIMO_API_KEY 读取
- * - 若当前模型 input 已含 "image"（原生多模态），从 active tools 里摘掉本工具；
- *   纯文本模型则保持可见。session_start / model_select 时同步。
+ * - baseUrl and model are fixed to Xiaomi MiMo's OpenAI-compatible endpoint.
+ * - apiKey is read from MIMO_API_KEY.
+ * - If the current model already accepts "image" input, remove this tool from the active
+ *   set. Keep it visible for text-only models. Synchronize on session_start/model_select.
  */
 
 const TOOL_NAME = "view_image";
@@ -96,33 +96,33 @@ export default function (pi: ExtensionAPI) {
 		name: TOOL_NAME,
 		label: "View Image",
 		description:
-			"用视觉模型描述本地图片文件内容。当前主模型不支持读图时使用本工具。" +
-			"传入图片路径（绝对路径或相对 cwd），可选 prompt / context / detail_level。" +
-			"支持 JPEG、PNG、GIF、WebP、BMP、SVG、TIFF、ICO、HEIC、HEIF。" +
-			"输出截断到 2000 行或 50KB。",
-		promptSnippet: "用视觉模型描述本地图片（主模型无读图能力时）",
+			"Describe a local image with a vision model when the primary model cannot read images. " +
+			"Pass an absolute path or one relative to cwd, with optional prompt, context, and detail_level. " +
+			"Supports JPEG, PNG, GIF, WebP, BMP, SVG, TIFF, ICO, HEIC, and HEIF. " +
+			"Output is truncated to 2,000 lines or 50 KB.",
+		promptSnippet: "Describe local images when the primary model lacks vision",
 		promptGuidelines: [
-			"当前主模型不能直接读图时，用 view_image 描述截图、照片或本地图片，不要猜测图片内容。",
-			"用户给出相对路径时按工作目录解析；优先传绝对路径更稳妥。",
+			"When the primary model cannot read images directly, use view_image to describe screenshots, photos, or other local images instead of guessing their contents.",
+			"Resolve user-provided relative paths against the working directory; prefer absolute paths when practical.",
 		],
 		parameters: Type.Object({
 			image_path: Type.String({
-				description: "图片路径（绝对路径，或相对当前工作目录）",
+				description: "Image path, either absolute or relative to the current working directory",
 			}),
 			prompt: Type.Optional(
 				Type.String({
-					description: '给视觉模型的具体问题或指令。默认 "Describe this image in detail."',
+					description: 'Specific question or instruction for the vision model. Defaults to "Describe this image in detail."',
 				}),
 			),
 			context: Type.Optional(
 				Type.String({
-					description: "对话背景 / 用户原始问题，帮助视觉模型理解最终目的",
+					description: "Conversation context or the user's original question, to clarify the ultimate goal",
 				}),
 			),
 			detail_level: Type.Optional(
 				Type.Union([Type.Literal("brief"), Type.Literal("standard"), Type.Literal("detailed")], {
 					description:
-						"描述粒度：brief=1-2 句，standard=常规详细，detailed=穷尽分析。默认 standard。",
+						"Description depth: brief = 1-2 sentences, standard = normally detailed, detailed = exhaustive analysis. Defaults to standard.",
 				}),
 			),
 		}),
@@ -142,8 +142,8 @@ export default function (pi: ExtensionAPI) {
 			const truncated = details?.truncated ?? false;
 			let summary = theme.fg("success", "View Image");
 			if (details?.detailLevel) summary += theme.fg("dim", ` · ${details.detailLevel}`);
-			if (truncated) summary += theme.fg("warning", " · 已截断");
-			summary += theme.fg("dim", ` (${keyHint("app.tools.expand", "展开")})`);
+			if (truncated) summary += theme.fg("warning", " · truncated");
+			summary += theme.fg("dim", ` (${keyHint("app.tools.expand", "expand")})`);
 			if (!expanded) return new Text(summary, 0, 0);
 
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -153,7 +153,7 @@ export default function (pi: ExtensionAPI) {
 				out += `\n${theme.fg("toolOutput", line)}`;
 			}
 			if (lines.length > PREVIEW_LINES) {
-				out += `\n${theme.fg("muted", `... 还有 ${lines.length - PREVIEW_LINES} 行`)}`;
+				out += `\n${theme.fg("muted", `... ${lines.length - PREVIEW_LINES} more lines`)}`;
 			}
 			return new Text(out, 0, 0);
 		},
@@ -165,7 +165,7 @@ export default function (pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: "MIMO_API_KEY 未设置。请在环境变量中配置后再调用 view_image。",
+							text: "MIMO_API_KEY is not set. Configure the environment variable before calling view_image.",
 						},
 					],
 					details: {
@@ -186,8 +186,8 @@ export default function (pi: ExtensionAPI) {
 						{
 							type: "text",
 							text:
-								`不支持的图片格式 "${ext}"。` +
-								`支持：JPEG、PNG、GIF、WebP、BMP、SVG、TIFF、ICO、HEIC、HEIF。`,
+								`Unsupported image format "${ext}". ` +
+								"Supported formats: JPEG, PNG, GIF, WebP, BMP, SVG, TIFF, ICO, HEIC, and HEIF.",
 						},
 					],
 					details: {
@@ -208,8 +208,8 @@ export default function (pi: ExtensionAPI) {
 						{
 							type: "text",
 							text:
-								`无法读取图片 "${absPath}": ${err instanceof Error ? err.message : String(err)}。` +
-								`请确认路径存在且可读。`,
+								`Could not read image "${absPath}": ${err instanceof Error ? err.message : String(err)}. ` +
+								"Make sure the path exists and is readable.",
 						},
 					],
 					details: {
@@ -270,7 +270,7 @@ export default function (pi: ExtensionAPI) {
 						content: [
 							{
 								type: "text",
-								text: `视觉模型 API 错误: ${msg}。检查 MIMO_API_KEY 与端点可达性。`,
+								text: `Vision model API error: ${msg}. Check MIMO_API_KEY and endpoint connectivity.`,
 							},
 						],
 						details: {
@@ -292,7 +292,7 @@ export default function (pi: ExtensionAPI) {
 						.map((part) => part.text)
 						.join("\n");
 				}
-				if (!text) text = "(视觉模型返回空内容)";
+				if (!text) text = "(vision model returned no content)";
 
 				const t = truncateHead(text, {
 					maxLines: DEFAULT_MAX_LINES,
@@ -310,7 +310,7 @@ export default function (pi: ExtensionAPI) {
 			} catch (err: unknown) {
 				if (signal?.aborted) {
 					return {
-						content: [{ type: "text", text: "已取消" }],
+						content: [{ type: "text", text: "Cancelled" }],
 						details: {
 							path: absPath,
 							detailLevel,
@@ -324,8 +324,8 @@ export default function (pi: ExtensionAPI) {
 						{
 							type: "text",
 							text:
-								`视觉模型请求失败: ${err instanceof Error ? err.message : String(err)}。` +
-								`检查 MIMO_API_KEY 与网络。`,
+								`Vision model request failed: ${err instanceof Error ? err.message : String(err)}. ` +
+								"Check MIMO_API_KEY and network connectivity.",
 						},
 					],
 					details: {

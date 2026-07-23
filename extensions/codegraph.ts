@@ -1,26 +1,28 @@
 /**
- * codegraph -- pi 没有内建 MCP，这个扩展充当一个 stdio MCP client，把 codegraph
- * 的 codegraph_explore 工具桥接成 pi 原生工具，让 LLM 像调用内置工具一样调用它。
+ * codegraph -- Pi has no built-in MCP client, so this extension acts as a stdio MCP
+ * client and bridges codegraph_explore into a native Pi tool.
  *
- * 工具始终可见（session_start 时无条件加入 activeTools），不再按 .codegraph/
- * 是否存在门控。即便会话目录无索引也暴露工具：spawn 的 codegraph server 在无
- * 默认项目时照常运行，靠每次调用的 projectPath 解析目标库（agent 传了就查对应
- * .codegraph，没传则 codegraph 抛 NotIndexedError 引导补上）。
+ * The tool is always visible: session_start adds it to activeTools unconditionally
+ * rather than gating it on .codegraph/ existence. It remains available when the session
+ * directory has no index because the spawned server can run without a default project.
+ * Each call resolves its target from projectPath; if omitted, codegraph raises
+ * NotIndexedError to prompt the agent to provide one.
  *
- * 实现：spawn `codegraph serve --mcp` 子进程（不传 --path，靠 spawn 的 cwd
- * 选项让 codegraph 从 process.cwd() 向上找 .codegraph/；这样唯一可能含空格的
- * 是 cwd，它不经过 shell 参数拼接，天然安全），走换行分隔的 JSON-RPC 2.0
- * （codegraph 的 StdioTransport 即此格式，见 src/mcp/transport.ts）。子进程懒启动
- * （首次工具调用时才 spawn + initialize 握手），session_shutdown 时 kill。
- * 单进程服务整个会话的所有工具调用，用 id 多路复用并发请求。
+ * Implementation: spawn `codegraph serve --mcp` without --path and set options.cwd so
+ * codegraph searches upward from process.cwd() for .codegraph/. The only value that may
+ * contain spaces is cwd, which never passes through shell argument concatenation.
+ * Communication uses newline-delimited JSON-RPC 2.0, matching codegraph's StdioTransport
+ * in src/mcp/transport.ts. The child starts lazily on the first call, performs the
+ * initialize handshake, serves all session calls with request-ID multiplexing, and is
+ * terminated on session_shutdown.
  *
- * 只暴露 codegraph_explore（作者测过 agent 行为后故意收窄到一个强工具：一次
- * explore 调用就返回相关符号源码 + 调用路径 + 影响范围，一排窄工具反而让模型
- * 选错）。codegraph 其余 7 个只读工具（search/callers/callees/impact/node/
- * status/files）不桥接--本扩展只服务我一个人，不需要。
+ * Only codegraph_explore is exposed. Testing showed that one capable tool, returning
+ * relevant symbol source, call paths, and impact scope in a single call, guides agents
+ * better than a collection of narrow tools. The other read-only codegraph tools
+ * (search/callers/callees/impact/node/status/files) are intentionally not bridged.
  *
- * 参考：~/.pi/agent/extensions/view-image.ts（动态启停工具的 setActiveTools 模式）、
- * web-search.ts（手写 MCP client 的 lazy initialize 思路）。
+ * References: view-image.ts for the setActiveTools pattern and web-search.ts for the
+ * hand-written MCP client's lazy-initialization pattern.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -37,9 +39,10 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 
 /**
- * codegraph_explore 工具的 label + description + 参数 schema。
- * 描述与 schema 忠实抄自 codegraph 源码 src/mcp/tools.ts（v1.5.0），保证与
- * 安装的 codegraph 行为一致。工具集稳定，故硬编码而非运行时 tools/list 反射。
+ * Label, description, and parameter schema for codegraph_explore.
+ * The description and schema mirror codegraph v1.5.0's src/mcp/tools.ts so they match
+ * the installed behavior. The stable tool contract is hard-coded rather than discovered
+ * through tools/list at runtime.
  */
 const PROJECT_PATH_DESC =
 	"Absolute path to the project to query (or any directory inside it) - " +
@@ -48,14 +51,14 @@ const PROJECT_PATH_DESC =
 	"codebase, or when the server root has no index of its own (e.g. a " +
 	"monorepo where only sub-projects are indexed, so there is no default project).";
 
-/** 折叠态预览的前 N 行（全文已进 content 给 LLM，这里只是 TUI 显示层）。 */
+/** Number of leading lines shown when the collapsed TUI result is expanded. */
 const PREVIEW_LINES = 40;
 
-/** 折叠态摘要行：`<主标签> · <统计> [· 已截断] (展开键提示)`。 */
+/** Collapsed summary: `<label> · <stats> [· truncated] (expand key hint)`. */
 function summaryLine(theme: any, main: string, stat: string, truncated: boolean): string {
 	let line = theme.fg("success", `${main} · ${stat}`);
-	if (truncated) line += theme.fg("warning", " · 已截断");
-	line += theme.fg("dim", ` (${keyHint("app.tools.expand", "展开")})`);
+	if (truncated) line += theme.fg("warning", " · truncated");
+	line += theme.fg("dim", ` (${keyHint("app.tools.expand", "expand")})`);
 	return line;
 }
 
@@ -69,8 +72,9 @@ interface PendingCall {
 }
 
 /**
- * 一个 codegraph MCP 子进程的 thin client：懒启动、initialize 握手、
- * tools/call 多路复用。会话级单例，session_shutdown 时 stop()。
+ * Thin client for one codegraph MCP child process. It starts lazily, performs the
+ * initialize handshake, and multiplexes tools/call requests. One instance serves the
+ * session and is stopped on session_shutdown.
  */
 class CodeGraphMcpClient {
 	private child: ChildProcess | null = null;
@@ -87,7 +91,7 @@ class CodeGraphMcpClient {
 		this.binary = process.env.CODEGRAPH_BIN ?? "codegraph";
 	}
 
-	/** 懒启动：首次调用 spawn + initialize。并发调用只启动一次。 */
+	/** Spawn and initialize lazily on the first call; concurrent calls share one startup. */
 	private async ensureReady(signal?: AbortSignal): Promise<void> {
 		if (this.child && !this.child.killed && this.initialized) return;
 		if (this.startingPromise) {
@@ -104,15 +108,16 @@ class CodeGraphMcpClient {
 
 	private start(signal?: AbortSignal, forceShell = false): Promise<void> {
 		return new Promise<void>((resolve, reject) => {
-			// 不传 --path：唯一可能含空格的是 cwd，而 spawn 的 options.cwd 直接
-			// 设子进程工作目录、不经过 shell 参数拼接，天然安全。codegraph
-			// serve --mcp 会从 process.cwd() 向上找最近的 .codegraph/。
+			// Omit --path. The only value that may contain spaces is cwd, and options.cwd
+			// sets it directly without shell argument concatenation. codegraph serve --mcp
+			// searches upward from process.cwd() for the nearest .codegraph/ index.
 			const args = ["serve", "--mcp"];
 			if (process.env.CODEGRAPH_NO_WATCH) args.push("--no-watch");
 
-			// 优先 shell:false（scoop 的 codegraph.exe / unix 脚本可直接 spawn，
-			// 避开 Node 的 DEP0190 shell 参数拼接警告）；ENOENT 才回落 shell:true
-			// （npm 全局装的 .cmd shim 需要它）。两条路径固定、可信，无注入风险。
+			// Prefer shell:false: Scoop's codegraph.exe and Unix scripts can spawn directly,
+			// avoiding Node's DEP0190 warning about shell argument concatenation. Fall back
+			// to shell:true only on ENOENT for globally installed npm .cmd shims. Both the
+			// executable and argument list are fixed and trusted.
 			const trySpawn = (useShell: boolean): ChildProcess =>
 				spawn(this.binary, args, {
 					cwd: this.spawnCwd,
@@ -126,18 +131,18 @@ class CodeGraphMcpClient {
 				child = trySpawn(true);
 			}
 
-			// shell:false 找不到二进制会异步 emit 'error'(ENOENT)。回落 shell:true 重试一次。
+			// A missing binary with shell:false emits ENOENT asynchronously; retry once with a shell.
 			child.once("error", (enoentErr: Error & { code?: string }) => {
 				if (enoentErr.code === "ENOENT" && !forceShell) {
-					// shell:false 找不到二进制 -> 用 shell:true 重试一次（npm .cmd shim 需要）
+					// Globally installed npm .cmd shims require shell:true.
 					this.start(signal, true).then(resolve, reject);
 					return;
 				}
 				this.cleanup();
 				reject(
 					new Error(
-						`无法启动 codegraph（"${this.binary} serve --mcp"）：${enoentErr.message}。` +
-							"确认 codegraph 已安装且在 PATH，或设置 CODEGRAPH_BIN 指向其路径。",
+						`Could not start codegraph ("${this.binary} serve --mcp"): ${enoentErr.message}. ` +
+							"Make sure codegraph is installed and on PATH, or set CODEGRAPH_BIN to its executable.",
 					),
 				);
 			});
@@ -152,7 +157,7 @@ class CodeGraphMcpClient {
 			child.stdout?.on("data", (chunk: string) => {
 				this.buf += chunk;
 				let idx: number;
-				// 逐行 drain；尾部分片留在 buf 等下次 data。
+				// Drain complete lines and keep a trailing fragment in buf for the next chunk.
 				while ((idx = this.buf.indexOf("\n")) !== -1) {
 					const line = this.buf.slice(0, idx).trim();
 					this.buf = this.buf.slice(idx + 1);
@@ -160,16 +165,16 @@ class CodeGraphMcpClient {
 				}
 			});
 
-			// 子进程意外退出：拒绝所有在途调用，下次调用会重启。
+			// Reject in-flight calls after an unexpected exit; the next call restarts the child.
 			child.on("exit", (code: number | null, sig: NodeJS.Signals | null) => {
-				const err = new Error(`codegraph 子进程退出（code=${code} signal=${sig}）`);
+				const err = new Error(`codegraph child process exited (code=${code} signal=${sig})`);
 				for (const p of this.pending.values()) p.reject(err);
 				this.pending.clear();
 				this.initialized = false;
 				this.child = null;
 			});
 
-			// 发 initialize，等响应。
+			// Send initialize and wait for its response.
 			this.request(
 				"initialize",
 				{
@@ -180,7 +185,7 @@ class CodeGraphMcpClient {
 				signal,
 			)
 				.then(() => {
-					// 发 notifications/initialized（无 id，无需响应）
+					// Send notifications/initialized without an ID or expected response.
 					this.notify("notifications/initialized");
 					this.initialized = true;
 					resolve();
@@ -194,10 +199,10 @@ class CodeGraphMcpClient {
 		try {
 			msg = JSON.parse(line);
 		} catch {
-			return; // 非 JSON 行忽略（不应发生，codegraph stdout 只发 JSON-RPC）
+			return; // Ignore non-JSON lines; codegraph should emit only JSON-RPC on stdout.
 		}
 
-		// 对我们 request 的响应（有 id，有 result 或 error，无 method）
+		// Response to one of our requests: ID plus result/error, without method.
 		if (
 			msg.jsonrpc === "2.0" &&
 			typeof msg.method !== "string" &&
@@ -213,9 +218,9 @@ class CodeGraphMcpClient {
 			return;
 		}
 
-		// 服务端主动请求（如 roots/list）或通知：用空结果回应请求，通知忽略。
-		// 我们已通过 --path 显式传了项目根，roots/list 一般不会发；即便发，
-		// 空 roots 也安全（codegraph 会回落到 --path）。
+		// For server-initiated requests such as roots/list, reply with an empty result;
+		// ignore notifications. Empty roots are safe because codegraph falls back to its
+		// configured project path.
 		if (msg.method && msg.id !== undefined && msg.id !== null) {
 			this.write({ jsonrpc: "2.0", id: msg.id, result: {} });
 		}
@@ -243,22 +248,22 @@ class CodeGraphMcpClient {
 			};
 			const timer = setTimeout(() => {
 				if (this.pending.delete(id)) {
-					reject(new Error(`codegraph ${method} 超时（30s）`));
+					reject(new Error(`codegraph ${method} timed out after 30 seconds`));
 				}
 			}, 30000);
 			timer.unref?.();
 			this.pending.set(id, entry);
 			this.write({ jsonrpc: "2.0", id, method, params });
 
-			// 中止：从 pending 移除并 reject。不杀子进程（其它并发调用还要用），
-			// 迟到的响应会被忽略。
+			// On abort, remove and reject this request without killing the child, which may
+			// still serve concurrent calls. A late response is ignored.
 			if (signal) {
-				if (signal.aborted) entry.reject(new Error("已取消"));
+				if (signal.aborted) entry.reject(new Error("Cancelled"));
 				else
 					signal.addEventListener(
 						"abort",
 						() => {
-							if (this.pending.delete(id)) entry.reject(new Error("已取消"));
+							if (this.pending.delete(id)) entry.reject(new Error("Cancelled"));
 						},
 						{ once: true },
 					);
@@ -266,7 +271,7 @@ class CodeGraphMcpClient {
 		});
 	}
 
-	/** 调用一个 codegraph 工具，返回 MCP tools/call 的 result。 */
+	/** Call one codegraph tool and return its MCP tools/call result. */
 	async callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
 		await this.ensureReady(signal);
 		return this.request("tools/call", { name, arguments: args }, signal);
@@ -284,26 +289,27 @@ class CodeGraphMcpClient {
 	}
 
 	stop(): void {
-		for (const p of this.pending.values()) p.reject(new Error("codegraph 扩展已关闭"));
+		for (const p of this.pending.values()) p.reject(new Error("codegraph extension has shut down"));
 		this.pending.clear();
 		this.cleanup();
 	}
 }
 
 // ---------------------------------------------------------------------------
-// 会话级状态：当前会话的 client + 启动 cwd
+// Session-level state: current client and startup cwd
 // ---------------------------------------------------------------------------
 
 let client: CodeGraphMcpClient | null = null;
 let sessionCwd: string | null = null;
 
-/** 本扩展唯一暴露的 codegraph 工具名。 */
+/** The only codegraph tool exposed by this extension. */
 const CODEGRAPH_TOOL = "codegraph_explore";
 
 /**
- * codegraph 数据目录名。读 CODEGRAPH_DIR 环境覆盖（对齐 codegraph 的
- * directory.ts codeGraphDirName）：Win/WSL 共享工作树时会设它让两套环境
- * 各占一份索引。非纯目录名（含分隔符 / ".." / 绝对路径）一律忽略回落 .codegraph。
+ * Return the codegraph data-directory name. CODEGRAPH_DIR mirrors codegraph's
+ * directory.ts codeGraphDirName override, allowing Windows and WSL to keep separate
+ * indexes in a shared worktree. Reject anything other than a plain directory name,
+ * including separators, "..", and absolute paths, and fall back to .codegraph.
  */
 function codegraphDirName(): string {
 	const raw = process.env.CODEGRAPH_DIR?.trim();
@@ -314,10 +320,10 @@ function codegraphDirName(): string {
 }
 
 /**
- * cwd（向上）是否存在可用的 codegraph 索引。对齐 codegraph 的 isInitialized：
- * 要求 `<dir>/<codegraphDirName>/codegraph.db` 存在，而非仅
- * `<dir>/<codegraphDirName>/` 目录存在——否则会误判 home 目录那种只放全局
- * 配置(telemetry.json 等)、无 db 的 .codegraph/ 为“已初始化项目”。
+ * Check upward from cwd for a usable codegraph index, matching codegraph's
+ * isInitialized behavior. Require `<dir>/<codegraphDirName>/codegraph.db`, not merely
+ * the directory, so a home-level .codegraph containing only global configuration such
+ * as telemetry.json is not mistaken for an initialized project.
  */
 function hasDefaultCodegraphProject(cwd: string): boolean {
 	const dirName = codegraphDirName();
@@ -325,16 +331,16 @@ function hasDefaultCodegraphProject(cwd: string): boolean {
 	for (;;) {
 		if (existsSync(join(dir, dirName, "codegraph.db"))) return true;
 		const parent = dirname(dir);
-		if (parent === dir) break; // 到达文件系统根
+		if (parent === dir) break; // Reached the filesystem root.
 		dir = parent;
 	}
 	return false;
 }
 
 /**
- * 会话启动时确保 codegraph_explore 在 activeTools 里。总是可见，不再按
- * .codegraph/ 是否存在门控--即便会话目录无索引也暴露工具，靠 codegraph 的
- * projectPath 在调用时解析目标库（server 能在无默认项目下启动）。幂等。
+ * Ensure codegraph_explore is active at session start. Keep it visible even without a
+ * local index because projectPath resolves the target at call time and the server can
+ * start without a default project. Idempotent.
  */
 function activateCodeGraphTool(pi: ExtensionAPI, cwd: string): void {
 	sessionCwd = cwd;
@@ -345,16 +351,16 @@ function activateCodeGraphTool(pi: ExtensionAPI, cwd: string): void {
 }
 
 /**
- * 取当前会话的 client（懒创建）。始终返回 client--哪怕 sessionCwd 无
- * .codegraph 索引：codegraph server 在无默认项目时照常运行，靠每次调用的
- * projectPath 解析目标库；agent 漏传时由 codegraph 抛 NotIndexedError 引导。
+ * Return the current session's lazily created client, even when sessionCwd has no index.
+ * The server can run without a default project and resolve each target through
+ * projectPath; if the agent omits it, codegraph raises NotIndexedError.
  */
 function getClient(): CodeGraphMcpClient {
 	if (!client) client = new CodeGraphMcpClient(sessionCwd ?? process.cwd());
 	return client;
 }
 
-/** 把 MCP tools/call 的 result 规整成 pi 的 ToolResult（截断 + details 统计）。 */
+/** Convert an MCP tools/call result into a truncated Pi ToolResult with summary details. */
 async function forwardToCodegraph(
 	toolName: string,
 	args: Record<string, unknown>,
@@ -377,7 +383,7 @@ async function forwardToCodegraph(
 	};
 }
 
-/** 通用 renderResult：折叠摘要 + 展开预览前 N 行。 */
+/** Shared result renderer with a collapsed summary and first-N-lines expanded preview. */
 function renderCodegraphResult(
 	result: any,
 	{ expanded, isPartial }: { expanded: boolean; isPartial: boolean },
@@ -390,7 +396,7 @@ function renderCodegraphResult(
 	const totalLines: number = result.details?.totalLines ?? 0;
 	const isError: boolean = result.details?.isError ?? false;
 
-	let stat = `${totalLines} 行`;
+	let stat = `${totalLines} lines`;
 	if (isError) stat = `error · ${stat}`;
 	const summary = summaryLine(theme, label, stat, truncated);
 	if (!expanded) return new Text(summary, 0, 0);
@@ -402,19 +408,20 @@ function renderCodegraphResult(
 		out += `\n${theme.fg("toolOutput", line)}`;
 	}
 	if (lines.length > PREVIEW_LINES) {
-		out += `\n${theme.fg("muted", `... 还有 ${lines.length - PREVIEW_LINES} 行`)}`;
+		out += `\n${theme.fg("muted", `... ${lines.length - PREVIEW_LINES} more lines`)}`;
 	}
 	return new Text(out, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
-// 工具定义
+// Tool definition
 // ---------------------------------------------------------------------------
 
 /**
- * 注册 codegraph_explore 工具。projectPathRequired 控制 projectPath 是否必填：
- * 会话目录(向上)无可用 codegraph 索引时传 true，对齐 codegraph 原版无默认项目时的
- * withRequiredProjectPath（高显著性通道，比 prose guideline 强）。
+ * Register codegraph_explore. projectPathRequired controls whether projectPath is
+ * mandatory. Pass true when no usable index exists at or above the session directory,
+ * matching codegraph's withRequiredProjectPath behavior when there is no default project.
+ * A required schema field is more salient to the model than a prose guideline.
  */
 function registerExploreTool(pi: ExtensionAPI, projectPathRequired: boolean): void {
 	pi.registerTool({
@@ -425,10 +432,10 @@ function registerExploreTool(pi: ExtensionAPI, projectPathRequired: boolean): vo
 			"Give a BAG OF SYMBOL/FILE NAMES (e.g. 'AuthService loginUser session-manager') - NOT a natural-language sentence. " +
 			"Under the hood query is whitespace-tokenized and each token is matched literally against symbol names (via SQLite FTS5 + bounded edit-distance fuzzy fallback); there is NO LLM/NLP, so free-form prose gets split into keywords and often misses. " +
 			"Usually the ONLY call you need - more accurate context, in far fewer tokens and round-trips than a search/Read/Grep loop.",
-		promptSnippet: "codegraph 主工具：一次调用返回相关符号源码 + 调用路径，替代 grep+Read 循环",
+		promptSnippet: "Primary codegraph tool: return relevant symbol source and call paths in one call instead of a grep/Read loop",
 		promptGuidelines: [
-			"对于结构性/流程问题（X 如何到达 Y、调用链、影响范围、某区域怎么运作），优先用 codegraph_explore 而不是 Read/Grep。",
-			"codegraph_explore 返回的源码是逐字当前磁盘内容，视为已 Read，不要重复 Read 那些文件。",
+			"For structural or flow questions, such as how X reaches Y, call chains, impact scope, or how an area works, prefer codegraph_explore over Read/Grep.",
+			"Source returned by codegraph_explore is verbatim current disk content. Treat it as already read and do not reopen those files.",
 		],
 		parameters: Type.Object({
 			query: Type.String({
@@ -463,11 +470,12 @@ function registerExploreTool(pi: ExtensionAPI, projectPathRequired: boolean): vo
 export default function (pi: ExtensionAPI) {
 	registerExploreTool(pi, /*projectPathRequired*/ false);
 
-	// --- 会话生命周期：激活工具 + 子进程清理 ---
+	// --- Session lifecycle: tool activation and child-process cleanup ---
 	pi.on("session_start", (_event, ctx) => {
 		sessionCwd = ctx.cwd;
-		// 会话目录(向上)无可用 codegraph 索引 -> 重注册为 projectPath 必填。
-		// 检测的是 codegraph.db 而非 .codegraph/ 目录，避免误判 home 的全局配置目录。
+		// If no usable index exists at or above the session directory, re-register with
+		// projectPath required. Check codegraph.db rather than the directory alone to avoid
+		// mistaking a home-level global configuration directory for a project index.
 		if (!hasDefaultCodegraphProject(ctx.cwd)) {
 			registerExploreTool(pi, /*projectPathRequired*/ true);
 		}
