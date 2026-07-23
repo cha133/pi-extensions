@@ -1,7 +1,7 @@
 # AGENTS.md
 
-Personal [pi](https://pi.dev) coding-agent extension package. Auto-discovered as a
-pi package; each file in `extensions/` is a self-contained extension.
+A [pi](https://pi.dev) coding-agent extension package. Auto-discovered as a pi
+package; each file in `extensions/` is a self-contained extension.
 
 This file is a quick-reference for any agent (or human) working in this repo. For
 the human-facing overview see `README.md`; for exact behavior read the source.
@@ -72,9 +72,6 @@ If VS Code shows stale type errors after dependency changes:
 
 ## Git
 
-- Commit author: `cha133 <cha133@vip.qq.com>` (set in this repo's `.git/config`,
-  overrides the global config). Use `git commit --author="cha133 <cha133@vip.qq.com>"`
-  if authoring from a context where committer differs.
 - Commit messages: imperative mood, subject <= ~72 chars, blank line, bullet body.
 - Line endings: repo is LF; git may warn about LF→CRLF on Windows -- safe to ignore.
 

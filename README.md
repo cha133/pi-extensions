@@ -1,6 +1,6 @@
 # pi-extensions
 
-Personal [pi](https://pi.dev) coding-agent extensions.
+A collection of [pi](https://pi.dev) coding-agent extensions.
 
 | Extension | Tools / behavior |
 |-----------|------------------|
