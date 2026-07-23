@@ -38,7 +38,7 @@ export default function (pi: ExtensionAPI) {
 				"搜索优先用已装的 CLI 而不是 Unix 工具：用 `fd` 找文件（如 `fd -e md` 找所有 markdown，不是 `find`），用 `rg` 搜内容（不是 `grep`/`Select-String`）；截断输出用 `Select-Object -First N` / `-Last N`（不是 `head` / `tail`，也可 `Get-Content -TotalCount N` / `-Tail N`），统计行数用 `(Get-Content f | Measure-Object -Line).Lines`（不是 `wc -l`），查命令路径用 `(Get-Command name).Source`（不是 `which`）。",
 				"给原生 exe 传多行参数（如 git commit message）用 here-string：`@'...'@`（单引号不展开变量）或 `@\"...\"@`（展开变量）；闭合标记 `'@` / `\"@` 必须顶格（行首无缩进），否则报错。",
 				"命令替换用 `$(cmd)`；`&&` / `||` 在 pwsh7 支持；管道传递的是对象不是文本。",
-				"临时脚本优先写 js 到 `$env:TEMP` 用 bun 运行（如 `bun \"$env:TEMP\\scratch.js\"`），不要写 python/pwsh/bash 脚本；跑 .ps1 用 pwsh.exe（不是 powershell.exe），跑 .sh 用 sh.exe（不是 bash.exe）。",
+				"跑 .ps1 用 pwsh.exe（不是 powershell.exe），跑 .sh 用 sh.exe（不是 bash.exe）。",
 			],
 		});
 	});

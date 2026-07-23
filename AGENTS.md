@@ -11,6 +11,7 @@ the human-facing overview see `README.md`; for exact behavior read the source.
 ```
 extensions/        # one extension per .ts file, default-exported factory (pi: ExtensionAPI) => void
   bash.ts          # overrides built-in `bash` -> runs PowerShell 7 (pwsh.exe)
+  bun.ts           # adds guidance to use temp Bun scripts for non-trivial shell logic
   edit.ts          # overrides built-in `edit` -> multi-strategy fuzzy matching
   codegraph.ts     # bridges codegraph's codegraph_explore MCP tool into a native pi tool
   web-search.ts    # web_search + web_fetch via Exa public MCP (no API key)
@@ -24,6 +25,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | Tool | File | Notes |
 |------|------|-------|
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
+| _(none)_ | bun.ts | Adds system-prompt guidance via `before_agent_start`: move non-trivial shell logic into a temporary TypeScript/JavaScript script under `$env:TEMP`, then run it with `bun run`. |
 | `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → LineTrimmed → WhitespaceNorm → IndentFlexible → EscapeNorm → BlockAnchor) ported from opencode. Separate calls run sequentially; preserves BOM + EOL. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
