@@ -8,7 +8,7 @@ Personal [pi](https://pi.dev) coding-agent extensions.
 | `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> LineTrimmed -> WhitespaceNorm -> IndentFlexible -> EscapeNorm -> BlockAnchor), ported from opencode |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
-| `view-image.ts` | `view_image` — MiMo vision for text-only models; hidden when the active model already accepts images |
+| `view-image.ts` | `view_image` - MiMo vision for text-only models; hidden when the active model already accepts images |
 
 ## Install
 

@@ -17,7 +17,7 @@
  * 只暴露 codegraph_explore（作者测过 agent 行为后故意收窄到一个强工具：一次
  * explore 调用就返回相关符号源码 + 调用路径 + 影响范围，一排窄工具反而让模型
  * 选错）。codegraph 其余 7 个只读工具（search/callers/callees/impact/node/
- * status/files）不桥接——本扩展只服务我一个人，不需要。
+ * status/files）不桥接--本扩展只服务我一个人，不需要。
  *
  * 参考：~/.pi/agent/extensions/view-image.ts（动态启停工具的 setActiveTools 模式）、
  * web-search.ts（手写 MCP client 的 lazy initialize 思路）。

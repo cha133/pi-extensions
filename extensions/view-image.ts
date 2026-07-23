@@ -45,7 +45,7 @@ const SYSTEM_PROMPTS: Record<"brief" | "standard" | "detailed", string> = {
 		"Focus only on the most important subject and action in the image. " +
 		"Be direct and brief.",
 	standard:
-		"You are a helpful image describer. Describe the image in detail — " +
+		"You are a helpful image describer. Describe the image in detail - " +
 		"cover main subjects, composition, colors, setting, and any notable elements. " +
 		"Be thorough but focused. Do not add interpretation beyond what is visible.",
 	detailed:
