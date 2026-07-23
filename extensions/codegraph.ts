@@ -24,6 +24,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { Type } from "typebox";
 import {
 	DEFAULT_MAX_BYTES,
@@ -45,9 +47,6 @@ const PROJECT_PATH_DESC =
 	"Omit to use this session's default project. Pass it to query a second " +
 	"codebase, or when the server root has no index of its own (e.g. a " +
 	"monorepo where only sub-projects are indexed, so there is no default project).";
-
-const projectPath = () =>
-	Type.Optional(Type.String({ description: PROJECT_PATH_DESC }));
 
 /** 折叠态预览的前 N 行（全文已进 content 给 LLM，这里只是 TUI 显示层）。 */
 const PREVIEW_LINES = 40;
@@ -302,6 +301,37 @@ let sessionCwd: string | null = null;
 const CODEGRAPH_TOOL = "codegraph_explore";
 
 /**
+ * codegraph 数据目录名。读 CODEGRAPH_DIR 环境覆盖（对齐 codegraph 的
+ * directory.ts codeGraphDirName）：Win/WSL 共享工作树时会设它让两套环境
+ * 各占一份索引。非纯目录名（含分隔符 / ".." / 绝对路径）一律忽略回落 .codegraph。
+ */
+function codegraphDirName(): string {
+	const raw = process.env.CODEGRAPH_DIR?.trim();
+	if (!raw || raw === "." || raw.includes("..") || raw.includes("/") || raw.includes("\\")) {
+		return ".codegraph";
+	}
+	return raw;
+}
+
+/**
+ * cwd（向上）是否存在可用的 codegraph 索引。对齐 codegraph 的 isInitialized：
+ * 要求 `<dir>/<codegraphDirName>/codegraph.db` 存在，而非仅
+ * `<dir>/<codegraphDirName>/` 目录存在——否则会误判 home 目录那种只放全局
+ * 配置(telemetry.json 等)、无 db 的 .codegraph/ 为“已初始化项目”。
+ */
+function hasDefaultCodegraphProject(cwd: string): boolean {
+	const dirName = codegraphDirName();
+	let dir = resolve(cwd);
+	for (;;) {
+		if (existsSync(join(dir, dirName, "codegraph.db"))) return true;
+		const parent = dirname(dir);
+		if (parent === dir) break; // 到达文件系统根
+		dir = parent;
+	}
+	return false;
+}
+
+/**
  * 会话启动时确保 codegraph_explore 在 activeTools 里。总是可见，不再按
  * .codegraph/ 是否存在门控--即便会话目录无索引也暴露工具，靠 codegraph 的
  * projectPath 在调用时解析目标库（server 能在无默认项目下启动）。幂等。
@@ -381,8 +411,12 @@ function renderCodegraphResult(
 // 工具定义
 // ---------------------------------------------------------------------------
 
-export default function (pi: ExtensionAPI) {
-	// --- codegraph_explore ---
+/**
+ * 注册 codegraph_explore 工具。projectPathRequired 控制 projectPath 是否必填：
+ * 会话目录(向上)无可用 codegraph 索引时传 true，对齐 codegraph 原版无默认项目时的
+ * withRequiredProjectPath（高显著性通道，比 prose guideline 强）。
+ */
+function registerExploreTool(pi: ExtensionAPI, projectPathRequired: boolean): void {
 	pi.registerTool({
 		name: "codegraph_explore",
 		label: "CodeGraph Explore",
@@ -395,7 +429,6 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"对于结构性/流程问题（X 如何到达 Y、调用链、影响范围、某区域怎么运作），优先用 codegraph_explore 而不是 Read/Grep。",
 			"codegraph_explore 返回的源码是逐字当前磁盘内容，视为已 Read，不要重复 Read 那些文件。",
-			"查询的目标项目与会话默认项目（会话启动目录向上最近的 .codegraph）不同、或会话目录无 .codegraph 时，用 projectPath 传入目标项目绝对路径；漏传时 codegraph 会报 NotIndexedError 提示补上。",
 		],
 		parameters: Type.Object({
 			query: Type.String({
@@ -407,7 +440,9 @@ export default function (pi: ExtensionAPI) {
 					description: "Maximum number of files to include source code from (default: 12)",
 				}),
 			),
-			projectPath,
+			projectPath: projectPathRequired
+				? Type.String({ description: PROJECT_PATH_DESC })
+				: Type.Optional(Type.String({ description: PROJECT_PATH_DESC })),
 		}),
 		renderCall(args, theme) {
 			let t = theme.fg("toolTitle", theme.bold("codegraph_explore "));
@@ -423,9 +458,19 @@ export default function (pi: ExtensionAPI) {
 			return forwardToCodegraph("codegraph_explore", params, signal);
 		},
 	});
+}
+
+export default function (pi: ExtensionAPI) {
+	registerExploreTool(pi, /*projectPathRequired*/ false);
 
 	// --- 会话生命周期：激活工具 + 子进程清理 ---
 	pi.on("session_start", (_event, ctx) => {
+		sessionCwd = ctx.cwd;
+		// 会话目录(向上)无可用 codegraph 索引 -> 重注册为 projectPath 必填。
+		// 检测的是 codegraph.db 而非 .codegraph/ 目录，避免误判 home 的全局配置目录。
+		if (!hasDefaultCodegraphProject(ctx.cwd)) {
+			registerExploreTool(pi, /*projectPathRequired*/ true);
+		}
 		activateCodeGraphTool(pi, ctx.cwd);
 	});
 
