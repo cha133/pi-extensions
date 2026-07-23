@@ -4,7 +4,7 @@ Personal [pi](https://pi.dev) coding-agent extensions.
 
 | Extension | Tools / behavior |
 |-----------|------------------|
-| `exa-websearch.ts` | `exa_web_search`, `exa_web_fetch` via Exa public MCP (no API key) |
+| `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (no API key) |
 | `pwsh-bash.ts` | Overrides built-in `bash` to run PowerShell 7 |
 | `view-image.ts` | `view_image` — MiMo vision for text-only models; hidden when the active model already accepts images |
 
@@ -22,7 +22,7 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 
 | Extension | Notes |
 |-----------|--------|
-| `exa-websearch` | Network access to `https://mcp.exa.ai/mcp` |
+| `web-search` | Network access to `https://mcp.exa.ai/mcp` |
 | `pwsh-bash` | PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` (edit the path if needed) |
 | `view-image` | `MIMO_API_KEY` env var; calls `https://api.xiaomimimo.com/v1` with model `mimo-v2.5` |
 

@@ -62,7 +62,7 @@ async function ensureInitialized(signal?: AbortSignal): Promise<void> {
 			params: {
 				protocolVersion: PROTOCOL_VERSION,
 				capabilities: {},
-				clientInfo: { name: "pi-exa-websearch", version: "1.0" },
+				clientInfo: { name: "pi-web-search", version: "1.0" },
 			},
 		}),
 		signal,
@@ -144,16 +144,16 @@ interface FetchDetails {
 
 export default function (pi: ExtensionAPI) {
 	pi.registerTool({
-		name: "exa_web_search",
-		label: "Exa Web Search",
+		name: "web_search",
+		label: "Web Search",
 		description:
 			"通过 Exa 搜索网络，返回最相关页面的标题、URL 与内容摘要。用于查当前信息、新闻、事实、人物、公司等任何主题。" +
 			"query 写自然语言描述理想页面而非关键词（如 'blog post comparing React and Vue performance'）。" +
 			"输出截断到 2000 行或 50KB。",
 		promptSnippet: "通过 Exa 搜索网络获取当前信息",
 		promptGuidelines: [
-			"当用户问到当前信息、最新新闻、网络事实，或你不确定时效性的内容时，用 exa_web_search 而不是凭记忆回答。",
-			"需要深入读某个 URL 的正文时，在 exa_web_search 之后再调 exa_web_fetch。",
+			"当用户问到当前信息、最新新闻、网络事实，或你不确定时效性的内容时，用 web_search 而不是凭记忆回答。",
+			"需要深入读某个 URL 的正文时，在 web_search 之后再调 web_fetch。",
 		],
 		parameters: Type.Object({
 			query: Type.String({ description: "自然语言查询，描述理想页面而非关键词" }),
@@ -161,7 +161,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		renderCall(args, theme, _context) {
-			let text = theme.fg("toolTitle", theme.bold("exa_web_search "));
+			let text = theme.fg("toolTitle", theme.bold("web_search "));
 			const q = args.query.length > 60 ? `${args.query.slice(0, 57)}...` : args.query;
 			text += theme.fg("accent", `"${q}"`);
 			if (args.numResults) text += theme.fg("dim", ` · ${args.numResults}`);
@@ -214,10 +214,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
-		name: "exa_web_fetch",
-		label: "Exa Web Fetch",
+		name: "web_fetch",
+		label: "Web Fetch",
 		description:
-			"通过 Exa 抓取指定 URL 的正文（clean text）。用于在 exa_web_search 选中某条结果后深入阅读。" +
+			"通过 Exa 抓取指定 URL 的正文（clean text）。用于在 web_search 选中某条结果后深入阅读。" +
 			"输入一个或多个 URL，返回干净文本。输出截断到 2000 行或 50KB。",
 		promptSnippet: "通过 Exa 抓取指定 URL 的正文",
 		parameters: Type.Object({
@@ -228,7 +228,7 @@ export default function (pi: ExtensionAPI) {
 		}),
 
 		renderCall(args, theme, _context) {
-			let text = theme.fg("toolTitle", theme.bold("exa_web_fetch "));
+			let text = theme.fg("toolTitle", theme.bold("web_fetch "));;
 			text += theme.fg("accent", `${args.urls.length} url${args.urls.length > 1 ? "s" : ""}`);
 			if (args.urls[0]) {
 				const u = args.urls[0].length > 50 ? `${args.urls[0].slice(0, 47)}...` : args.urls[0];

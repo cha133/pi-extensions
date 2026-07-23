@@ -20,7 +20,7 @@
  * status/files）不桥接——本扩展只服务我一个人，不需要。
  *
  * 参考：~/.pi/agent/extensions/view-image.ts（动态启停工具的 setActiveTools 模式）、
- * exa-websearch.ts（手写 MCP client 的 lazy initialize 思路）。
+ * web-search.ts（手写 MCP client 的 lazy initialize 思路）。
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
