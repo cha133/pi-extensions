@@ -428,13 +428,15 @@ function registerExploreTool(pi: ExtensionAPI, projectPathRequired: boolean): vo
 		name: "codegraph_explore",
 		label: "CodeGraph Explore",
 		description:
-			"PRIMARY TOOL - call FIRST for almost any question OR before an edit: how does X work, architecture, a bug, where/what is X, surveying an area, or the symbols you are about to change. Returns the verbatim source of the relevant symbols grouped by file in ONE capped call (Read-equivalent - treat the shown source as already Read; do NOT re-open those files), plus the call path among them. " +
+			"STRUCTURAL EXPLORATION TOOL - use after you know relevant symbol or file names to inspect call paths, dependencies, impact scope, or how an area works. Returns the verbatim source of relevant symbols grouped by file in one capped call (Read-equivalent - treat shown source as already read and do not reopen those files), plus the call path among them. " +
 			"Give a BAG OF SYMBOL/FILE NAMES (e.g. 'AuthService loginUser session-manager') - NOT a natural-language sentence. " +
 			"Under the hood query is whitespace-tokenized and each token is matched literally against symbol names (via SQLite FTS5 + bounded edit-distance fuzzy fallback); there is NO LLM/NLP, so free-form prose gets split into keywords and often misses. " +
-			"Usually the ONLY call you need - more accurate context, in far fewer tokens and round-trips than a search/Read/Grep loop.",
-		promptSnippet: "Primary codegraph tool: return relevant symbol source and call paths in one call instead of a grep/Read loop",
+			"Use rg first when you do not yet know the identifiers, need exhaustive lexical matches, or need to establish that something is absent. A CodeGraph miss is not evidence that matching code does not exist.",
+		promptSnippet:
+			"Use rg to discover or exhaustively search; use codegraph_explore with known symbol/file names for structural relationships",
 		promptGuidelines: [
-			"For structural or flow questions, such as how X reaches Y, call chains, impact scope, or how an area works, prefer codegraph_explore over Read/Grep.",
+			"Use rg first to discover symbol/file anchors, enumerate all textual matches, or check whether something is absent. Do not treat an empty or incomplete CodeGraph result as proof that matching code does not exist.",
+			"Once relevant symbol or file names are known, use codegraph_explore for structural or flow questions such as how X reaches Y, call chains, dependencies, impact scope, or how an area works.",
 			"Source returned by codegraph_explore is verbatim current disk content. Treat it as already read and do not reopen those files.",
 		],
 		parameters: Type.Object({
