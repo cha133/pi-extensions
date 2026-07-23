@@ -24,7 +24,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | Tool | File | Notes |
 |------|------|-------|
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
-| `edit` | edit.ts | **Overrides built-in.** Multi-strategy fuzzy match (Exact → LineTrimmed → WhitespaceNorm → IndentFlexible → EscapeNorm → BlockAnchor) ported from opencode. Same edits[] semantics: one-pass on original content, each `oldText` unique, no overlap, preserves BOM + EOL. |
+| `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → LineTrimmed → WhitespaceNorm → IndentFlexible → EscapeNorm → BlockAnchor) ported from opencode. Separate calls run sequentially; preserves BOM + EOL. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
 | `web_fetch` | web-search.ts | Same Exa MCP, fetches URL bodies. Call after `web_search`. |

@@ -18,9 +18,12 @@
  * 替换不会污染未编辑区域。外层逐个 yield，命中唯一匹配即采用；多匹配则继续试更
  * 严格的策略，全部失败才报 not found / multiple matches。
  *
- * 保留内置 edit 的语义：edits[] 一次性对原始内容匹配（非增量）、各 oldText 须唯一、
- * 禁止重叠、保留 BOM 与原文件行尾。diff 生成复用与内置 edit-diff.ts 相同的 `diff`
- * 包与相同的展示格式（带行号、上下文折叠、firstChangedLine 定位），TUI 渲染一致。
+ * 与 opencode / Claude Code 一样，每次调用只做一个 oldText → newText 替换。多个修改
+ * 应拆成多个工具调用，并由 executionMode: "sequential" 串行执行。这样一个匹配失败
+ * 不会让同批其他修改一起报废，也避免模型为组装大型 edits[] 长时间规划。
+ *
+ * 保留 BOM 与原文件行尾。diff 生成复用与内置 edit-diff.ts 相同的 `diff` 包与相同的
+ * 展示格式（带行号、上下文折叠、firstChangedLine 定位），TUI 渲染一致。
  *
  * 放 ~/.pi/agent/extensions/ 自动发现；同名 registerTool 覆盖内置 edit。
  * 热重载：会话内用 /reload 即可生效。
@@ -28,7 +31,6 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
-	createEditTool,
 	generateDiffString,
 	generateUnifiedPatch,
 } from "@earendil-works/pi-coding-agent";
@@ -36,9 +38,15 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { Type } from "typebox";
 
-// schema / description / prepareArguments 复用内置 edit，保持兼容（含旧式 oldText/newText、edits 为 JSON string 的 quirk）。cwd 仅用于取 schema，不影响 execute（execute 内用 ctx.cwd）。
-const BUILTIN = createEditTool(process.cwd());
+const editSchema = Type.Object({
+	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
+	oldText: Type.String({
+		description: "Text for one targeted replacement. It must identify a unique region in the file.",
+	}),
+	newText: Type.String({ description: "Replacement text for this targeted edit." }),
+});
 
 // ---------------------------------------------------------------------------
 // 行尾 / BOM
@@ -269,15 +277,6 @@ const BlockAnchorReplacer: Replacer = function* (content, find) {
 	}
 };
 
-const REPLACERS: Replacer[] = [
-	ExactReplacer,
-	LineTrimmedReplacer,
-	WhitespaceNormalizedReplacer,
-	IndentationFlexibleReplacer,
-	EscapeNormalizedReplacer,
-	BlockAnchorReplacer,
-];
-
 // ---------------------------------------------------------------------------
 // 安全检查：拒绝匹配到比 oldText 大得多的块（BlockAnchor 等模糊匹配可能误伤）
 // ---------------------------------------------------------------------------
@@ -297,39 +296,43 @@ function isDisproportionateMatch(search: string, oldString: string): boolean {
 interface Match {
 	index: number;
 	length: number;
+	strategy: string;
 }
 
-function findMatch(content: string, oldText: string, path: string, editIndex: number, total: number): Match {
+const NAMED_REPLACERS: Array<{ name: string; replacer: Replacer }> = [
+	{ name: "exact", replacer: ExactReplacer },
+	{ name: "line-trimmed", replacer: LineTrimmedReplacer },
+	{ name: "whitespace-normalized", replacer: WhitespaceNormalizedReplacer },
+	{ name: "indentation-flexible", replacer: IndentationFlexibleReplacer },
+	{ name: "escape-normalized", replacer: EscapeNormalizedReplacer },
+	{ name: "block-anchor", replacer: BlockAnchorReplacer },
+];
+
+function findMatch(content: string, oldText: string, path: string): Match {
 	let notFound = true;
 
-	for (const replacer of REPLACERS) {
+	for (const { name, replacer } of NAMED_REPLACERS) {
 		for (const search of replacer(content, oldText)) {
 			const index = content.indexOf(search);
 			if (index === -1) continue;
 			notFound = false;
 			if (isDisproportionateMatch(search, oldText)) {
 				throw new Error(
-					`Refusing replacement in ${path}: the matched span for edits[${editIndex}] is much larger than oldText. Re-read the file and provide the full exact oldText.`,
+					`Refusing replacement in ${path}: the matched span is much larger than oldText. Re-read the file and provide the full exact oldText.`,
 				);
 			}
 			const lastIndex = content.lastIndexOf(search);
 			if (index !== lastIndex) continue; // 不唯一，试下一个 yield / 策略
-			return { index, length: search.length };
+			return { index, length: search.length, strategy: name };
 		}
 	}
 
 	if (notFound) {
-		const msg =
-			total === 1
-				? `Could not find oldText in ${path}. It must match (exact, or via whitespace/indentation/escape-tolerant fallback).`
-				: `Could not find edits[${editIndex}].oldText in ${path}.`;
-		throw new Error(msg);
+		throw new Error(
+			`Could not find oldText in ${path}. It must match (exact, or via whitespace/indentation/escape-tolerant fallback).`,
+		);
 	}
-	throw new Error(
-		total === 1
-			? `Found multiple matches for oldText in ${path}. Provide more surrounding context to make it unique.`
-			: `Found multiple matches for edits[${editIndex}].oldText in ${path}. Provide more surrounding context to make it unique.`,
-	);
+	throw new Error(`Found multiple matches for oldText in ${path}. Provide more surrounding context to make it unique.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,25 +349,32 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "edit", // 同名覆盖内置 edit
 		label: "edit",
-		description: BUILTIN.description,
-		parameters: BUILTIN.parameters,
-		prepareArguments: BUILTIN.prepareArguments,
-		promptSnippet: "容错匹配的精确文件编辑（支持空白/缩进/转义/行尾归一化与首尾锚点模糊匹配）",
+		description:
+			"Edit a single file with one targeted text replacement. oldText must identify a unique region. Matching tolerates minor whitespace, indentation, and escaping differences.",
+		parameters: editSchema,
+		promptSnippet: "Make one precise, fuzzy-tolerant text replacement in a file",
 		promptGuidelines: [
 			"Use edit for precise file edits. oldText is matched against the original file with multi-strategy fallback: exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, and block-anchor fuzzy. Tab/space mixing and minor mismatches are tolerated, but still copy the original text as closely as possible.",
-			"When changing multiple separate locations in one file, use one edit call with multiple entries in edits[] instead of multiple edit calls.",
-			"Each edits[].oldText must be unique in the file. If not unique, add more surrounding context to disambiguate.",
-			"Keep edits[].oldText as small as possible while still being unique. Do not pad with large unchanged regions.",
-			"edits[].oldText must not be empty and must differ from newText. Do not emit overlapping or nested edits.",
+			"Each edit call performs exactly one oldText to newText replacement. For multiple changes, issue separate edit calls; they are executed sequentially.",
+			"oldText must be unique in the file. If not unique, add more surrounding context to disambiguate.",
+			"Keep oldText as small as possible while still being unique. Do not pad it with large unchanged regions.",
+			"oldText must not be empty and must differ from newText.",
 		],
-		executionMode: "sequential", // 文件写入串行，避免同批 edit 并发写冲突
+		executionMode: "sequential", // 多个独立 edit 工具调用串行，避免同文件并发写冲突
 
 		async execute(_toolCallId, input, signal, _onUpdate, ctx) {
-			const args = input as { path?: string; edits?: Array<{ oldText?: string; newText?: string }> };
+			const args = input as { path?: string; oldText?: string; newText?: string };
 			const path = args.path;
-			const edits = args.edits;
-			if (typeof path !== "string" || !Array.isArray(edits) || edits.length === 0) {
-				throw new Error("edit requires 'path' (string) and 'edits' (non-empty array of {oldText,newText}).");
+			const oldText = args.oldText;
+			const newText = args.newText;
+			if (typeof path !== "string" || typeof oldText !== "string" || typeof newText !== "string") {
+				throw new Error("edit requires 'path', 'oldText', and 'newText' strings.");
+			}
+			if (oldText.length === 0) {
+				throw new Error(`oldText must not be empty in ${path}.`);
+			}
+			if (oldText === newText) {
+				throw new Error(`oldText and newText are identical in ${path}.`);
 			}
 
 			const absolutePath = resolvePath(path, ctx.cwd);
@@ -391,48 +401,14 @@ export default function (pi: ExtensionAPI): void {
 			const originalEnding = detectLineEnding(text);
 			const content = normalizeToLF(text);
 
-			// 对每个 edit 在原始 content 上找匹配
-			const matched: Array<{ index: number; length: number; newText: string }> = [];
-			for (let i = 0; i < edits.length; i++) {
-				const edit = edits[i];
-				if (typeof edit.oldText !== "string" || typeof edit.newText !== "string") {
-					throw new Error(`edits[${i}] in ${path} must have string oldText and newText.`);
-				}
-				if (edit.oldText.length === 0) {
-					throw new Error(
-						edits.length === 1 ? `oldText must not be empty in ${path}.` : `edits[${i}].oldText must not be empty in ${path}.`,
-					);
-				}
-				if (edit.oldText === edit.newText) {
-					throw new Error(
-						edits.length === 1
-							? `oldText and newText are identical in ${path}.`
-							: `edits[${i}].oldText and newText are identical in ${path}.`,
-					);
-				}
-				const m = findMatch(content, edit.oldText, path, i, edits.length);
-				matched.push({ index: m.index, length: m.length, newText: normalizeToLF(edit.newText) });
-			}
+			const match = findMatch(content, normalizeToLF(oldText), path);
 			throwIfAborted();
 
-			// 重叠检查
-			const sorted = [...matched].sort((a, b) => a.index - b.index);
-			for (let i = 1; i < sorted.length; i++) {
-				if (sorted[i - 1].index + sorted[i - 1].length > sorted[i].index) {
-					const a = matched.indexOf(sorted[i - 1]);
-					const b = matched.indexOf(sorted[i]);
-					throw new Error(
-						`edits[${a}] and edits[${b}] overlap in ${path}. Merge them into one edit or target disjoint regions.`,
-					);
-				}
-			}
-
-			// 倒序替换，保持 offset 稳定
-			let newContent = content;
-			for (let i = sorted.length - 1; i >= 0; i--) {
-				const m = sorted[i];
-				newContent = newContent.substring(0, m.index) + m.newText + newContent.substring(m.index + m.length);
-			}
+			const normalizedNewText = normalizeToLF(newText);
+			const newContent =
+				content.substring(0, match.index) +
+				normalizedNewText +
+				content.substring(match.index + match.length);
 
 			if (newContent === content) {
 				throw new Error(`No changes made to ${path}. The replacement produced identical content.`);
@@ -445,11 +421,13 @@ export default function (pi: ExtensionAPI): void {
 
 			const diffResult = generateDiffString(content, newContent);
 			const patch = generateUnifiedPatch(path, content, newContent);
+			const fallbackNote =
+				match.strategy === "exact" ? "" : ` Matched using the ${match.strategy} fallback.`;
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
+						text: `Successfully replaced text in ${path}.${fallbackNote}`,
 					},
 				],
 				details: {
