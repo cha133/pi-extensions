@@ -12,7 +12,9 @@
  *   3. WhitespaceNorm   collapse \s+ to one space, handling tabs and repeated spaces
  *   4. IndentFlexible   remove minimum common indentation before comparing
  *   5. EscapeNorm       unescape literal \n, \t, \r, and similar model quirks
- *   6. BlockAnchor      anchor on first/last lines and score the middle with Levenshtein
+ *   6. PartialLineIndent match a multiline substring while ignoring indentation after
+ *                        newlines; only applies when an endpoint is a line fragment
+ *   7. BlockAnchor      anchor on first/last lines and score the middle with Levenshtein
  *                       similarity (>= 0.65); choose the best candidate and tolerate
  *                       a line-count difference of up to 25%
  *
@@ -214,9 +216,63 @@ const EscapeNormalizedReplacer: Replacer = function* (content, find) {
 	}
 };
 
+/**
+ * 6. Match a multiline substring while ignoring horizontal indentation at line starts.
+ *
+ * Unlike the whole-line replacers above, this handles a find string whose first or last
+ * line is only a fragment. Character offsets map back to the original content so the
+ * replacement never consumes the unmatched prefix/suffix or indentation on adjacent
+ * lines.
+ */
+const PartialLineIndentationReplacer: Replacer = function* (content, find) {
+	if (!find.includes("\n")) return;
+
+	const normalize = (
+		text: string,
+	): { text: string; originalStarts: number[]; originalEnds: number[] } => {
+		let normalized = "";
+		const originalStarts: number[] = [];
+		const originalEnds: number[] = [];
+		let atLineStart = true;
+
+		for (let i = 0; i < text.length; i++) {
+			const char = text[i];
+			if (atLineStart && (char === " " || char === "\t")) continue;
+			normalized += char;
+			originalStarts.push(i);
+			originalEnds.push(i + 1);
+			atLineStart = char === "\n";
+		}
+
+		return { text: normalized, originalStarts, originalEnds };
+	};
+
+	const normalizedContent = normalize(content);
+	const normalizedFind = normalize(find).text;
+	if (normalizedFind === "") return;
+
+	let fromIndex = 0;
+	while (fromIndex <= normalizedContent.text.length - normalizedFind.length) {
+		const normalizedIndex = normalizedContent.text.indexOf(normalizedFind, fromIndex);
+		if (normalizedIndex === -1) break;
+
+		const normalizedEnd = normalizedIndex + normalizedFind.length;
+		const start = normalizedContent.originalStarts[normalizedIndex];
+		const end = normalizedContent.originalEnds[normalizedEnd - 1];
+		const lineStart = content.lastIndexOf("\n", start - 1) + 1;
+		const nextNewline = content.indexOf("\n", end);
+		const lineEnd = nextNewline === -1 ? content.length : nextNewline;
+		const startsMidLine = content.slice(lineStart, start).trim().length > 0;
+		const endsMidLine = content.slice(end, lineEnd).trim().length > 0;
+
+		if (startsMidLine || endsMidLine) yield content.substring(start, end);
+		fromIndex = normalizedIndex + 1;
+	}
+};
+
 const BLOCK_ANCHOR_SIMILARITY_THRESHOLD = 0.65;
 
-/** 6. Anchor on first/last lines and choose the candidate with the best middle-line Levenshtein score. */
+/** 7. Anchor on first/last lines and choose the candidate with the best middle-line Levenshtein score. */
 const BlockAnchorReplacer: Replacer = function* (content, find) {
 	const findLines = find.split("\n");
 	if (findLines.length < 3) return;
@@ -310,31 +366,65 @@ const NAMED_REPLACERS: Array<{ name: string; replacer: Replacer }> = [
 	{ name: "whitespace-normalized", replacer: WhitespaceNormalizedReplacer },
 	{ name: "indentation-flexible", replacer: IndentationFlexibleReplacer },
 	{ name: "escape-normalized", replacer: EscapeNormalizedReplacer },
+	{ name: "partial-line-indentation", replacer: PartialLineIndentationReplacer },
 	{ name: "block-anchor", replacer: BlockAnchorReplacer },
 ];
 
-function findMatch(content: string, oldText: string, path: string): Match {
+function findAllOccurrences(content: string, search: string): number[] {
+	const indices: number[] = [];
+	let fromIndex = 0;
+	while (fromIndex <= content.length - search.length) {
+		const index = content.indexOf(search, fromIndex);
+		if (index === -1) break;
+		indices.push(index);
+		fromIndex = index + 1;
+	}
+	return indices;
+}
+
+function partialLineHint(content: string, oldText: string): string {
+	const oldLines = oldText.split("\n");
+	const contentLines = content.split("\n");
+	const endpoints = [
+		{ label: "first", text: oldLines[0].trim() },
+		{ label: "last", text: oldLines[oldLines.length - 1].trim() },
+	];
+
+	const fragment = endpoints.find(
+		(endpoint) =>
+			endpoint.text.length > 0 &&
+			contentLines.some((line) => {
+				const trimmed = line.trim();
+				return trimmed !== endpoint.text && trimmed.includes(endpoint.text);
+			}),
+	);
+	if (!fragment) return "";
+	return ` The ${fragment.label} line of oldText appears to be a line fragment; re-read the file and check its exact indentation and surrounding text.`;
+}
+
+export function findMatch(content: string, oldText: string, path: string): Match {
 	let notFound = true;
 
 	for (const { name, replacer } of NAMED_REPLACERS) {
+		const matches = new Map<string, Match>();
 		for (const search of replacer(content, oldText)) {
-			const index = content.indexOf(search);
-			if (index === -1) continue;
-			notFound = false;
 			if (isDisproportionateMatch(search, oldText)) {
 				throw new Error(
 					`Refusing replacement in ${path}: the matched span is much larger than oldText. Re-read the file and provide the full exact oldText.`,
 				);
 			}
-			const lastIndex = content.lastIndexOf(search);
-			if (index !== lastIndex) continue; // Ambiguous: try the next yield or strategy.
-			return { index, length: search.length, strategy: name };
+			for (const index of findAllOccurrences(content, search)) {
+				notFound = false;
+				const match = { index, length: search.length, strategy: name };
+				matches.set(`${index}:${search.length}`, match);
+			}
 		}
+		if (matches.size === 1) return matches.values().next().value as Match;
 	}
 
 	if (notFound) {
 		throw new Error(
-			`Could not find oldText in ${path}. It must match (exact, or via whitespace/indentation/escape-tolerant fallback).`,
+			`Could not find oldText in ${path}. It must match (exact, or via whitespace/indentation/escape-tolerant fallback).${partialLineHint(content, oldText)}`,
 		);
 	}
 	throw new Error(`Found multiple matches for oldText in ${path}. Provide more surrounding context to make it unique.`);
@@ -360,7 +450,7 @@ export default function (pi: ExtensionAPI): void {
 		parameters: editSchema,
 		promptSnippet: "Make one precise, fuzzy-tolerant text replacement in a file",
 		promptGuidelines: [
-			"Use edit for precise file edits. oldText is matched against the original file with multi-strategy fallback: exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, and block-anchor fuzzy. Tab/space mixing and minor mismatches are tolerated, but still copy the original text as closely as possible.",
+			"Use edit for precise file edits. oldText is matched against the original file with multi-strategy fallback: exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, partial-line indentation, and block-anchor fuzzy. Tab/space mixing and minor mismatches are tolerated, but still copy the original text as closely as possible.",
 			"Each edit call performs exactly one oldText to newText replacement. For multiple changes, issue separate edit calls; they are executed sequentially.",
 			"oldText must be unique in the file. If not unique, add more surrounding context to disambiguate.",
 			"Keep oldText as small as possible while still being unique. Do not pad it with large unchanged regions.",
