@@ -1,8 +1,56 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import { win32 } from "node:path";
 
-// getShellConfig requires existsSync to succeed, so use an absolute path rather than bare "pwsh.exe".
-const PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+type FileExists = (path: string) => boolean;
+
+function getEnv(environment: NodeJS.ProcessEnv, name: string): string | undefined {
+	const match = Object.keys(environment).find((key) => key.toLowerCase() === name.toLowerCase());
+	return match ? environment[match] : undefined;
+}
+
+/**
+ * Resolve pwsh.exe to an absolute path because createBashTool requires shellPath
+ * to pass existsSync. PATH covers normal MSI, MSIX/Store/WinGet aliases, Scoop
+ * shims, ZIP installs, and .NET tools. Known install roots handle stale PATHs.
+ */
+export function resolvePwshPath(
+	environment: NodeJS.ProcessEnv = process.env,
+	fileExists: FileExists = existsSync,
+): string | undefined {
+	const candidates: string[] = [];
+	const pathValue = getEnv(environment, "PATH");
+
+	if (pathValue) {
+		for (const entry of pathValue.split(";")) {
+			const directory = entry.trim().replace(/^"(.*)"$/, "$1");
+			if (directory) candidates.push(win32.join(directory, "pwsh.exe"));
+		}
+	}
+
+	const addKnownPath = (rootName: string, ...segments: string[]) => {
+		const root = getEnv(environment, rootName);
+		if (root) candidates.push(win32.join(root, ...segments));
+	};
+
+	addKnownPath("ProgramFiles", "PowerShell", "7", "pwsh.exe");
+	addKnownPath("LOCALAPPDATA", "Microsoft", "WindowsApps", "pwsh.exe");
+	addKnownPath("LOCALAPPDATA", "Microsoft", "WinGet", "Links", "pwsh.exe");
+	addKnownPath("SCOOP", "shims", "pwsh.exe");
+	addKnownPath("USERPROFILE", "scoop", "shims", "pwsh.exe");
+	addKnownPath("SCOOP_GLOBAL", "shims", "pwsh.exe");
+	addKnownPath("ProgramData", "scoop", "shims", "pwsh.exe");
+
+	const seen = new Set<string>();
+	return candidates.find((candidate) => {
+		const normalized = win32.normalize(candidate);
+		const key = normalized.toLowerCase();
+		if (seen.has(key)) return false;
+		seen.add(key);
+		return fileExists(normalized);
+	});
+}
 
 /**
  * Override the built-in bash tool with PowerShell 7:
@@ -21,8 +69,15 @@ export function registerBash(pi: ExtensionAPI, platform: NodeJS.Platform = proce
 	if (platform !== "win32") return;
 
 	pi.on("session_start", async (_event, ctx) => {
+		const pwshPath = resolvePwshPath();
+		if (!pwshPath) {
+			throw new Error(
+				"PowerShell 7 (pwsh.exe) was not found. Install it or add its installation directory to PATH.",
+			);
+		}
+
 		const base = createBashTool(ctx.cwd, {
-			shellPath: PWSH,
+			shellPath: pwshPath,
 			spawnHook: ({ command, cwd, env }) => ({
 				command,
 				cwd,
