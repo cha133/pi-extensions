@@ -8,20 +8,20 @@
  * at https://github.com/nicepkg/opencode):
  *
  *   1. Exact            exact substring
- *   2. LineTrimmed      compare trimmed lines, ignoring leading/trailing whitespace
- *   3. WhitespaceNorm   collapse \s+ to one space, handling tabs and repeated spaces
- *   4. IndentFlexible   remove minimum common indentation before comparing
+ *   2. IndentFlexible   remove minimum common indentation before comparing
+ *   3. LineTrimmed      compare trimmed lines, ignoring leading/trailing whitespace
+ *   4. WhitespaceNorm   collapse \s+ to one space, handling tabs and repeated spaces
  *   5. EscapeNorm       unescape literal \n, \t, \r, and similar model quirks
  *   6. PartialLineIndent match a multiline substring while ignoring indentation after
  *                        newlines; only applies when an endpoint is a line fragment
- *   7. BlockAnchor      anchor on first/last lines and score the middle with Levenshtein
- *                       similarity (>= 0.65); choose the best candidate and tolerate
- *                       a line-count difference of up to 25%
+ *   7. BlockAnchor      anchor on first/last lines and score the middle with aligned
+ *                       line similarity (>= 0.72 plus a runner-up margin); tolerate a
+ *                       line-count difference of up to 25%
  *
- * Every Replacer yields an actual substring from the original content. This preserves
- * exact indexOf positioning and prevents edits from affecting untouched regions. The
- * outer loop accepts the first unique match, continues after ambiguous matches, and only
- * reports not found / multiple matches after all strategies fail.
+ * Every matcher yields exact spans in the original content. Deterministic strategies
+ * accept the first unique match and may use a later, more structural matcher to resolve
+ * ambiguity. BlockAnchor returns all fuzzy candidates and requires both a minimum score
+ * and a clear margin over the runner-up.
  *
  * Like opencode and Claude Code, each call performs one oldText -> newText replacement.
  * Multiple changes should use separate calls, serialized by executionMode: "sequential".
@@ -90,35 +90,97 @@ function resolvePath(p: string, cwd: string): string {
 
 function levenshtein(a: string, b: string): number {
 	if (a === "" || b === "") return Math.max(a.length, b.length);
-	const matrix = Array.from({ length: a.length + 1 }, (_, i) =>
-		Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)),
-	);
+
+	// Keep the shorter string on the horizontal axis so memory stays O(min(a, b)).
+	if (a.length < b.length) [a, b] = [b, a];
+	let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+	let current = new Array<number>(b.length + 1);
 	for (let i = 1; i <= a.length; i++) {
+		current[0] = i;
 		for (let j = 1; j <= b.length; j++) {
 			const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-			matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + cost);
+			current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
 		}
+		[previous, current] = [current, previous];
 	}
-	return matrix[a.length][b.length];
+	return previous[b.length];
 }
 
 // ---------------------------------------------------------------------------
-// Replacers are generators that yield actual substrings from the original content.
+// Matchers yield exact spans in the original content. Returning positions directly
+// preserves matcher provenance and avoids re-scanning yielded substrings with indexOf.
 // ---------------------------------------------------------------------------
 
-type Replacer = (content: string, find: string) => Generator<string, void, unknown>;
+type StrategyName =
+	| "exact"
+	| "indentation-flexible"
+	| "line-trimmed"
+	| "whitespace-normalized"
+	| "escape-normalized"
+	| "partial-line-indentation"
+	| "block-anchor";
 
-/** 1. Exact match. Yield find itself when content contains it. */
-const ExactReplacer: Replacer = function* (content, find) {
-	if (content.includes(find)) yield find;
+interface MatchCandidate {
+	index: number;
+	length: number;
+	strategy: StrategyName;
+	score?: number;
+}
+
+type Matcher = (content: string, find: string) => Generator<MatchCandidate, void, unknown>;
+
+function findAllOccurrences(content: string, search: string): number[] {
+	if (search.length === 0) return [];
+	const indices: number[] = [];
+	let fromIndex = 0;
+	while (fromIndex <= content.length - search.length) {
+		const index = content.indexOf(search, fromIndex);
+		if (index === -1) break;
+		indices.push(index);
+		fromIndex = index + 1;
+	}
+	return indices;
+}
+
+function getLineOffsets(content: string): number[] {
+	const offsets = [0];
+	for (let i = 0; i < content.length; i++) {
+		if (content[i] === "\n") offsets.push(i + 1);
+	}
+	return offsets;
+}
+
+function spanFromLines(
+	content: string,
+	lineOffsets: number[],
+	startLine: number,
+	lineCount: number,
+	strategy: StrategyName,
+	score?: number,
+): MatchCandidate {
+	const index = lineOffsets[startLine];
+	const endLineExclusive = startLine + lineCount;
+	const end =
+		endLineExclusive < lineOffsets.length
+			? lineOffsets[endLineExclusive] - 1
+			: content.length;
+	return { index, length: end - index, strategy, score };
+}
+
+/** 1. Exact substring matching. */
+const ExactMatcher: Matcher = function* (content, find) {
+	for (const index of findAllOccurrences(content, find)) {
+		yield { index, length: find.length, strategy: "exact" };
+	}
 };
 
-/** 2. Compare trimmed lines; yield the original block to preserve indentation and whitespace. */
-const LineTrimmedReplacer: Replacer = function* (content, find) {
+/** Compare trimmed lines while returning the corresponding original whole-line span. */
+const LineTrimmedMatcher: Matcher = function* (content, find) {
 	const originalLines = content.split("\n");
 	const searchLines = find.split("\n");
 	if (searchLines[searchLines.length - 1] === "") searchLines.pop();
 	if (searchLines.length === 0) return;
+	const lineOffsets = getLineOffsets(content);
 
 	for (let i = 0; i <= originalLines.length - searchLines.length; i++) {
 		let matches = true;
@@ -129,33 +191,29 @@ const LineTrimmedReplacer: Replacer = function* (content, find) {
 			}
 		}
 		if (matches) {
-			let start = 0;
-			for (let k = 0; k < i; k++) start += originalLines[k].length + 1;
-			let end = start;
-			for (let k = 0; k < searchLines.length; k++) {
-				end += originalLines[i + k].length;
-				if (k < searchLines.length - 1) end += 1;
-			}
-			yield content.substring(start, end);
+			yield spanFromLines(content, lineOffsets, i, searchLines.length, "line-trimmed");
 		}
 	}
 };
 
-/** 3. Compare after collapsing all whitespace to one space. */
-const WhitespaceNormalizedReplacer: Replacer = function* (content, find) {
+/** Compare fixed-line-count blocks after collapsing whitespace to one space. */
+const WhitespaceNormalizedMatcher: Matcher = function* (content, find) {
 	const norm = (s: string) => s.replace(/\s+/g, " ").trim();
 	const normalizedFind = norm(find);
 	if (normalizedFind === "") return;
 	const lines = content.split("\n");
 	const findLines = find.split("\n");
+	const lineOffsets = getLineOffsets(content);
 	for (let i = 0; i <= lines.length - findLines.length; i++) {
 		const block = lines.slice(i, i + findLines.length).join("\n");
-		if (norm(block) === normalizedFind) yield block;
+		if (norm(block) === normalizedFind) {
+			yield spanFromLines(content, lineOffsets, i, findLines.length, "whitespace-normalized");
+		}
 	}
 };
 
-/** 4. Compare after removing minimum common indentation. */
-const IndentationFlexibleReplacer: Replacer = function* (content, find) {
+/** Compare after removing minimum common indentation while preserving relative indentation. */
+const IndentationFlexibleMatcher: Matcher = function* (content, find) {
 	const removeIndent = (text: string): string => {
 		const lines = text.split("\n");
 		const nonEmpty = lines.filter((l) => l.trim().length > 0);
@@ -172,16 +230,19 @@ const IndentationFlexibleReplacer: Replacer = function* (content, find) {
 	const normalizedFind = removeIndent(find);
 	const contentLines = content.split("\n");
 	const findLines = find.split("\n");
+	const lineOffsets = getLineOffsets(content);
 	for (let i = 0; i <= contentLines.length - findLines.length; i++) {
 		const block = contentLines.slice(i, i + findLines.length).join("\n");
-		if (removeIndent(block) === normalizedFind) yield block;
+		if (removeIndent(block) === normalizedFind) {
+			yield spanFromLines(content, lineOffsets, i, findLines.length, "indentation-flexible");
+		}
 	}
 };
 
-/** 5. Unescape literal \n, \t, \r, and similar model quirks. */
-const EscapeNormalizedReplacer: Replacer = function* (content, find) {
+/** Unescape a deliberately small set of literal escapes in oldText only. */
+const EscapeNormalizedMatcher: Matcher = function* (content, find) {
 	const unescape = (str: string): string =>
-		str.replace(/\\(n|t|r|'|"|`|\\|\n|\$)/g, (match, captured: string) => {
+		str.replace(/\\(n|t|r|\\)/g, (match, captured: string) => {
 			switch (captured) {
 				case "n":
 					return "\n";
@@ -189,31 +250,17 @@ const EscapeNormalizedReplacer: Replacer = function* (content, find) {
 					return "\t";
 				case "r":
 					return "\r";
-				case "'":
-					return "'";
-				case '"':
-					return '"';
-				case "`":
-					return "`";
 				case "\\":
 					return "\\";
-				case "\n":
-					return "\n";
-				case "$":
-					return "$";
 				default:
 					return match;
 			}
 		});
 
 	const unescapedFind = unescape(find);
-	if (content.includes(unescapedFind)) yield unescapedFind;
-
-	const lines = content.split("\n");
-	const findLines = unescapedFind.split("\n");
-	for (let i = 0; i <= lines.length - findLines.length; i++) {
-		const block = lines.slice(i, i + findLines.length).join("\n");
-		if (unescape(block) === unescapedFind) yield block;
+	if (unescapedFind === find) return;
+	for (const index of findAllOccurrences(content, unescapedFind)) {
+		yield { index, length: unescapedFind.length, strategy: "escape-normalized" };
 	}
 };
 
@@ -225,7 +272,7 @@ const EscapeNormalizedReplacer: Replacer = function* (content, find) {
  * replacement never consumes the unmatched prefix/suffix or indentation on adjacent
  * lines.
  */
-const PartialLineIndentationReplacer: Replacer = function* (content, find) {
+const PartialLineIndentationMatcher: Matcher = function* (content, find) {
 	if (!find.includes("\n")) return;
 
 	const normalize = (
@@ -266,76 +313,84 @@ const PartialLineIndentationReplacer: Replacer = function* (content, find) {
 		const startsMidLine = content.slice(lineStart, start).trim().length > 0;
 		const endsMidLine = content.slice(end, lineEnd).trim().length > 0;
 
-		if (startsMidLine || endsMidLine) yield content.substring(start, end);
+		if (startsMidLine || endsMidLine) {
+			yield {
+				index: start,
+				length: end - start,
+				strategy: "partial-line-indentation",
+			};
+		}
 		fromIndex = normalizedIndex + 1;
 	}
 };
 
-const BLOCK_ANCHOR_SIMILARITY_THRESHOLD = 0.65;
+const BLOCK_ANCHOR_SIMILARITY_THRESHOLD = 0.72;
+const BLOCK_ANCHOR_MIN_SCORE_MARGIN = 0.08;
 
-/** 7. Anchor on first/last lines and choose the candidate with the best middle-line Levenshtein score. */
-const BlockAnchorReplacer: Replacer = function* (content, find) {
+function lineSubstitutionCost(a: string, b: string): number {
+	const left = a.trim();
+	const right = b.trim();
+	const maxLength = Math.max(left.length, right.length);
+	if (maxLength === 0) return 0;
+	return levenshtein(left, right) / maxLength;
+}
+
+function blockSimilarity(actual: string[], expected: string[]): number {
+	if (actual.length === 0 && expected.length === 0) return 1;
+	let previous = Array.from({ length: expected.length + 1 }, (_, index) => index);
+	let current = new Array<number>(expected.length + 1);
+
+	for (let i = 1; i <= actual.length; i++) {
+		current[0] = i;
+		for (let j = 1; j <= expected.length; j++) {
+			current[j] = Math.min(
+				previous[j] + 1,
+				current[j - 1] + 1,
+				previous[j - 1] + lineSubstitutionCost(actual[i - 1], expected[j - 1]),
+			);
+		}
+		[previous, current] = [current, previous];
+	}
+
+	const distance = previous[expected.length];
+	return Math.max(0, 1 - distance / Math.max(actual.length, expected.length, 1));
+}
+
+/** Anchor on first/last lines and score the entire middle as an aligned line sequence. */
+const BlockAnchorMatcher: Matcher = function* (content, find) {
 	const findLines = find.split("\n");
-	if (findLines.length < 3) return;
 	if (findLines[findLines.length - 1] === "") findLines.pop();
+	if (findLines.length < 3) return;
 	const searchBlockSize = findLines.length;
 	const maxLineDelta = Math.max(1, Math.floor(searchBlockSize * 0.25));
 	const firstLine = findLines[0].trim();
 	const lastLine = findLines[searchBlockSize - 1].trim();
+	if (firstLine.length === 0 || lastLine.length === 0) return;
+	if (firstLine === lastLine && firstLine.length < 4) return;
 	const contentLines = content.split("\n");
+	const lineOffsets = getLineOffsets(content);
 
-	const candidates: Array<{ startLine: number; endLine: number }> = [];
 	for (let i = 0; i < contentLines.length; i++) {
 		if (contentLines[i].trim() !== firstLine) continue;
-		for (let j = i + 2; j < contentLines.length; j++) {
-			if (contentLines[j].trim() === lastLine) {
-				const actualBlockSize = j - i + 1;
-				if (Math.abs(actualBlockSize - searchBlockSize) <= maxLineDelta) {
-					candidates.push({ startLine: i, endLine: j });
-				}
-				break;
-			}
-		}
-	}
-	if (candidates.length === 0) return;
+		const minBlockSize = Math.max(3, searchBlockSize - maxLineDelta);
+		const maxBlockSize = searchBlockSize + maxLineDelta;
+		const minEndLine = i + minBlockSize - 1;
+		const maxEndLine = Math.min(contentLines.length - 1, i + maxBlockSize - 1);
 
-	const scoreCandidate = (c: { startLine: number; endLine: number }): number => {
-		const actualBlockSize = c.endLine - c.startLine + 1;
-		const linesToCheck = Math.min(searchBlockSize - 2, actualBlockSize - 2);
-		if (linesToCheck <= 0) return 1.0;
-		let similarity = 0;
-		for (let j = 1; j < searchBlockSize - 1 && j < actualBlockSize - 1; j++) {
-			const originalLine = contentLines[c.startLine + j].trim();
-			const searchLine = findLines[j].trim();
-			const maxLen = Math.max(originalLine.length, searchLine.length);
-			if (maxLen === 0) {
-				similarity += 1 / linesToCheck;
-				continue;
-			}
-			similarity += (1 - levenshtein(originalLine, searchLine) / maxLen) / linesToCheck;
+		for (let endLine = minEndLine; endLine <= maxEndLine; endLine++) {
+			if (contentLines[endLine].trim() !== lastLine) continue;
+			const actualMiddle = contentLines.slice(i + 1, endLine);
+			const expectedMiddle = findLines.slice(1, -1);
+			const score = blockSimilarity(actualMiddle, expectedMiddle);
+			yield spanFromLines(
+				content,
+				lineOffsets,
+				i,
+				endLine - i + 1,
+				"block-anchor",
+				score,
+			);
 		}
-		return similarity;
-	};
-
-	let bestMatch: { startLine: number; endLine: number } | null = null;
-	let maxSimilarity = -1;
-	for (const candidate of candidates) {
-		const similarity = scoreCandidate(candidate);
-		if (similarity > maxSimilarity) {
-			maxSimilarity = similarity;
-			bestMatch = candidate;
-		}
-	}
-
-	if (bestMatch && maxSimilarity >= BLOCK_ANCHOR_SIMILARITY_THRESHOLD) {
-		let start = 0;
-		for (let k = 0; k < bestMatch.startLine; k++) start += contentLines[k].length + 1;
-		let end = start;
-		for (let k = bestMatch.startLine; k <= bestMatch.endLine; k++) {
-			end += contentLines[k].length;
-			if (k < bestMatch.endLine) end += 1;
-		}
-		yield content.substring(start, end);
 	}
 };
 
@@ -358,7 +413,7 @@ function isDisproportionateMatch(search: string, oldString: string): boolean {
 interface Match {
 	index: number;
 	length: number;
-	strategy: string;
+	strategy: StrategyName;
 }
 
 interface EditDetails {
@@ -367,26 +422,46 @@ interface EditDetails {
 	firstChangedLine?: number;
 }
 
-const NAMED_REPLACERS: Array<{ name: string; replacer: Replacer }> = [
-	{ name: "exact", replacer: ExactReplacer },
-	{ name: "line-trimmed", replacer: LineTrimmedReplacer },
-	{ name: "whitespace-normalized", replacer: WhitespaceNormalizedReplacer },
-	{ name: "indentation-flexible", replacer: IndentationFlexibleReplacer },
-	{ name: "escape-normalized", replacer: EscapeNormalizedReplacer },
-	{ name: "partial-line-indentation", replacer: PartialLineIndentationReplacer },
-	{ name: "block-anchor", replacer: BlockAnchorReplacer },
+const DETERMINISTIC_MATCHERS: Matcher[] = [
+	ExactMatcher,
+	IndentationFlexibleMatcher,
+	LineTrimmedMatcher,
+	WhitespaceNormalizedMatcher,
+	EscapeNormalizedMatcher,
+	PartialLineIndentationMatcher,
 ];
 
-function findAllOccurrences(content: string, search: string): number[] {
-	const indices: number[] = [];
-	let fromIndex = 0;
-	while (fromIndex <= content.length - search.length) {
-		const index = content.indexOf(search, fromIndex);
-		if (index === -1) break;
-		indices.push(index);
-		fromIndex = index + 1;
+interface CandidateCollection {
+	safe: MatchCandidate[];
+	rejectedUnsafe: number;
+}
+
+function collectCandidates(
+	content: string,
+	oldText: string,
+	candidates: Iterable<MatchCandidate>,
+): CandidateCollection {
+	const safe = new Map<string, MatchCandidate>();
+	let rejectedUnsafe = 0;
+
+	for (const candidate of candidates) {
+		const search = content.substring(candidate.index, candidate.index + candidate.length);
+		if (isDisproportionateMatch(search, oldText)) {
+			rejectedUnsafe++;
+			continue;
+		}
+
+		const key = `${candidate.index}:${candidate.length}`;
+		const existing = safe.get(key);
+		if (
+			!existing ||
+			(candidate.score !== undefined && candidate.score > (existing.score ?? Number.NEGATIVE_INFINITY))
+		) {
+			safe.set(key, candidate);
+		}
 	}
-	return indices;
+
+	return { safe: [...safe.values()], rejectedUnsafe };
 }
 
 function partialLineHint(content: string, oldText: string): string {
@@ -410,31 +485,45 @@ function partialLineHint(content: string, oldText: string): string {
 }
 
 export function findMatch(content: string, oldText: string, path: string): Match {
-	let notFound = true;
+	let foundAmbiguousMatch = false;
+	let rejectedUnsafe = 0;
 
-	for (const { name, replacer } of NAMED_REPLACERS) {
-		const matches = new Map<string, Match>();
-		for (const search of replacer(content, oldText)) {
-			if (isDisproportionateMatch(search, oldText)) {
-				throw new Error(
-					`Refusing replacement in ${path}: the matched span is much larger than oldText. Re-read the file and provide the full exact oldText.`,
-				);
-			}
-			for (const index of findAllOccurrences(content, search)) {
-				notFound = false;
-				const match = { index, length: search.length, strategy: name };
-				matches.set(`${index}:${search.length}`, match);
-			}
-		}
-		if (matches.size === 1) return matches.values().next().value as Match;
+	for (const matcher of DETERMINISTIC_MATCHERS) {
+		const collected = collectCandidates(content, oldText, matcher(content, oldText));
+		rejectedUnsafe += collected.rejectedUnsafe;
+		if (collected.safe.length === 1) return collected.safe[0];
+		if (collected.safe.length > 1) foundAmbiguousMatch = true;
 	}
 
-	if (notFound) {
+	const fuzzy = collectCandidates(content, oldText, BlockAnchorMatcher(content, oldText));
+	rejectedUnsafe += fuzzy.rejectedUnsafe;
+	const ranked = fuzzy.safe
+		.filter((candidate) => candidate.score !== undefined)
+		.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+
+	if ((ranked[0]?.score ?? -1) >= BLOCK_ANCHOR_SIMILARITY_THRESHOLD) {
+		const best = ranked[0];
+		const second = ranked[1];
+		if (
+			second &&
+			(best.score ?? 0) - (second.score ?? 0) < BLOCK_ANCHOR_MIN_SCORE_MARGIN
+		) {
+			throw new Error(`Found multiple matches for oldText in ${path}. Provide more surrounding context to make it unique.`);
+		}
+		return best;
+	}
+
+	if (foundAmbiguousMatch) {
+		throw new Error(`Found multiple matches for oldText in ${path}. Provide more surrounding context to make it unique.`);
+	}
+	if (rejectedUnsafe > 0) {
 		throw new Error(
-			`Could not find oldText in ${path}. It must match (exact, or via whitespace/indentation/escape-tolerant fallback).${partialLineHint(content, oldText)}`,
+			`Refusing replacement in ${path}: the matched span is much larger than oldText. Re-read the file and provide the full exact oldText.`,
 		);
 	}
-	throw new Error(`Found multiple matches for oldText in ${path}. Provide more surrounding context to make it unique.`);
+	throw new Error(
+		`Could not find oldText in ${path}. It must match (exact, or via whitespace/indentation/escape-tolerant fallback).${partialLineHint(content, oldText)}`,
+	);
 }
 
 function renderEditDiff(
@@ -473,7 +562,7 @@ export default function (pi: ExtensionAPI): void {
 		parameters: editSchema,
 		promptSnippet: "Make one precise, fuzzy-tolerant text replacement in a file",
 		promptGuidelines: [
-			"Use edit for precise file edits. oldText is matched against the original file with multi-strategy fallback: exact, line-trimmed, whitespace-normalized, indentation-flexible, escape-normalized, partial-line indentation, and block-anchor fuzzy. Tab/space mixing and minor mismatches are tolerated, but still copy the original text as closely as possible.",
+			"Use edit for precise file edits. oldText is matched against the original file with multi-strategy fallback: exact, indentation-flexible, line-trimmed, whitespace-normalized, escape-normalized, partial-line indentation, and block-anchor fuzzy. Tab/space mixing and minor mismatches are tolerated, but still copy the original text as closely as possible.",
 			"Each edit call performs exactly one oldText to newText replacement. For multiple changes, issue separate edit calls; they are executed sequentially.",
 			"oldText must be unique in the file. If not unique, add more surrounding context to disambiguate.",
 			"Keep oldText as small as possible while still being unique. Do not pad it with large unchanged regions.",
@@ -568,7 +657,6 @@ export default function (pi: ExtensionAPI): void {
 
 			const finalContent = bom + restoreLineEndings(newContent, originalEnding);
 			await writeFile(absolutePath, finalContent, "utf-8");
-			throwIfAborted();
 
 			const diffResult = generateDiffString(content, newContent);
 			const patch = generateUnifiedPatch(path, content, newContent);

@@ -1,5 +1,52 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import registerEdit, { findMatch } from "../extensions/edit.ts";
+
+describe("deterministic matching", () => {
+	test("prefers an exact unique match", () => {
+		const content = ["before", "target();", "after"].join("\n");
+		const match = findMatch(content, "target();", "example.ts");
+
+		expect(match.strategy).toBe("exact");
+		expect(content.slice(match.index, match.index + match.length)).toBe("target();");
+	});
+
+	test("rejects duplicate exact matches", () => {
+		const content = ["start", "alpha", "end", "---", "start", "alpha", "end"].join("\n");
+		const oldText = ["start", "alpha", "end"].join("\n");
+
+		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
+			"Found multiple matches for oldText",
+		);
+	});
+
+	test("uses relative indentation to disambiguate line-trimmed candidates", () => {
+		const content = [
+			"  if (ready) {",
+			"    run();",
+			"  }",
+			"",
+			"  if (ready) {",
+			"  run();",
+			"  }",
+		].join("\n");
+		const oldText = ["if (ready) {", "  run();", "}"].join("\n");
+		const match = findMatch(content, oldText, "example.ts");
+
+		expect(match.strategy).toBe("indentation-flexible");
+		expect(match.index).toBe(0);
+	});
+
+	test("unescapes a small set of oldText escapes", () => {
+		const content = ["alpha", "\tbeta"].join("\n");
+		const match = findMatch(content, "alpha\\n\\tbeta", "example.ts");
+
+		expect(match.strategy).toBe("escape-normalized");
+		expect(match.length).toBe(content.length);
+	});
+});
 
 describe("partial-line indentation matching", () => {
 	const firstLine =
@@ -89,6 +136,78 @@ describe("partial-line indentation matching", () => {
 	});
 });
 
+describe("block-anchor matching", () => {
+	test("selects a clearly better fuzzy candidate", () => {
+		const content = [
+			"start",
+			"const value = alphaX;",
+			"end",
+			"---",
+			"start",
+			"completely different",
+			"end",
+		].join("\n");
+		const oldText = ["start", "const value = alphaY;", "end"].join("\n");
+		const match = findMatch(content, oldText, "example.ts");
+
+		expect(match.strategy).toBe("block-anchor");
+		expect(match.index).toBe(0);
+	});
+
+	test("rejects tied fuzzy candidates instead of choosing the first", () => {
+		const content = [
+			"start",
+			"const value = alphaX;",
+			"end",
+			"---",
+			"start",
+			"const value = alphaZ;",
+			"end",
+		].join("\n");
+		const oldText = ["start", "const value = alphaY;", "end"].join("\n");
+
+		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
+			"Found multiple matches for oldText",
+		);
+	});
+
+	test("penalizes a missing middle line", () => {
+		const content = ["start", "alpha", "beta", "end"].join("\n");
+		const oldText = ["start", "alpha", "beta", "gamma", "end"].join("\n");
+
+		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
+			"Could not find oldText",
+		);
+	});
+
+	test("penalizes an inserted middle line", () => {
+		const content = ["start", "alpha", "beta", "gamma", "end"].join("\n");
+		const oldText = ["start", "alpha", "beta", "end"].join("\n");
+
+		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
+			"Could not find oldText",
+		);
+	});
+
+	test("continues past an early out-of-window tail anchor", () => {
+		const content = ["start", "alpha", "end", "beta", "end"].join("\n");
+		const oldText = ["start", "alpha", "ends", "beta", "end"].join("\n");
+		const match = findMatch(content, oldText, "example.ts");
+
+		expect(match.strategy).toBe("block-anchor");
+		expect(match.length).toBe(content.length);
+	});
+
+	test("does not fuzzy-match blocks with empty anchors", () => {
+		const content = ["", "alphaX", "end"].join("\n");
+		const oldText = ["", "alphaY", "end"].join("\n");
+
+		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
+			"Could not find oldText",
+		);
+	});
+});
+
 describe("edit rendering", () => {
 	test("uses extension-owned renderers instead of the built-in exact preview", () => {
 		let definition;
@@ -126,5 +245,43 @@ describe("edit rendering", () => {
 		const rendered = component.render(120).join("\n");
 
 		expect(rendered.match(/Could not find oldText\./g)).toHaveLength(1);
+	});
+});
+
+describe("edit execution", () => {
+	test("preserves BOM and CRLF and does not inspect cancellation after commit", async () => {
+		let definition;
+		registerEdit({
+			registerTool(tool) {
+				definition = tool;
+			},
+		});
+
+		const directory = await mkdtemp(join(tmpdir(), "pi-edit-test-"));
+		const path = join(directory, "example.txt");
+		await writeFile(path, "\uFEFFalpha\r\nbeta\r\n", "utf8");
+		let abortChecks = 0;
+		const signal = {
+			get aborted() {
+				abortChecks++;
+				return abortChecks > 5;
+			},
+		};
+
+		try {
+			await definition.execute(
+				"tool-call",
+				{ path, oldText: "alpha\nbeta", newText: "alpha\ngamma" },
+				signal,
+				undefined,
+				{ cwd: directory },
+			);
+			const updated = await readFile(path, "utf8");
+
+			expect(abortChecks).toBe(5);
+			expect(updated).toBe("\uFEFFalpha\r\ngamma\r\n");
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 });
