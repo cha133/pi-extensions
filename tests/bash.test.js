@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { registerBash, resolvePwshPath } from "../extensions/bash.ts";
+import {
+	BASH_PROMPT_GUIDELINES,
+	registerBash,
+	resolvePwshPath,
+} from "../extensions/bash.ts";
 
 describe("pwsh path resolution", () => {
 	test("prefers the first pwsh.exe found on PATH", () => {
@@ -39,6 +43,14 @@ describe("pwsh path resolution", () => {
 });
 
 describe("bash platform registration", () => {
+	test("warns that ripgrep -r replaces matches instead of enabling recursion", () => {
+		const guidance = BASH_PROMPT_GUIDELINES.join("\n");
+
+		expect(guidance).toContain("ripgrep searches directories recursively by default");
+		expect(guidance).toContain("`-r` means `--replace`");
+		expect(guidance).toContain("Use `rg -n PATTERN PATH`");
+	});
+
 	test("does not register on macOS or Linux", () => {
 		const events = [];
 		const pi = {

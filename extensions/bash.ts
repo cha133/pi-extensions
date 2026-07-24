@@ -22,6 +22,15 @@ import { win32 } from "node:path";
 
 type FileExists = (path: string) => boolean;
 
+export const BASH_PROMPT_GUIDELINES = [
+	"The bash tool runs pwsh7. Write PowerShell 7 syntax, not bash/sh: set environment variables with `$env:NAME = 'x'` (not `export`), continue lines with a backtick (not `\\`), test paths with `Test-Path` (not `[ -f ]`), and invoke executables whose paths contain spaces with `& 'C:\\path\\app.exe' arg`.",
+	"For searching, prefer the installed CLI tools: use `fd` to find files (for example, `fd -e md` for all Markdown files, not `find`) and `rg` to search content (not `grep` or `Select-String`). Limit output with `Select-Object -First N` / `-Last N` (not `head` / `tail`; `Get-Content -TotalCount N` / `-Tail N` also works), count lines with `(Get-Content f | Measure-Object -Line).Lines` (not `wc -l`), and locate commands with `(Get-Command name).Source` (not `which`).",
+	"ripgrep searches directories recursively by default. Do not use grep-style `rg -r` or `rg -rn`: in ripgrep, `-r` means `--replace`, so `rg -rn PATTERN PATH` replaces matches with `n`. Use `rg -n PATTERN PATH` for recursive search with line numbers.",
+	"Pass multiline arguments to native executables, such as Git commit messages, with a here-string: `@'...'@` does not expand variables, while `@\"...\"@` does. The closing marker `'@` / `\"@` must begin at column 1 or PowerShell will report an error.",
+	"Use `$(cmd)` for command substitution. PowerShell 7 supports `&&` and `||`; pipelines pass objects rather than text.",
+	"Run .ps1 files with pwsh.exe (not powershell.exe) and .sh files with sh.exe (not bash.exe).",
+];
+
 function getEnv(environment: NodeJS.ProcessEnv, name: string): string | undefined {
 	const match = Object.keys(environment).find((key) => key.toLowerCase() === name.toLowerCase());
 	return match ? environment[match] : undefined;
@@ -97,13 +106,7 @@ export function registerBash(pi: ExtensionAPI, platform: NodeJS.Platform = proce
 				"Output is truncated to the last 2,000 lines or 50 KB; overflow is saved to a temporary file whose path is included in the result. " +
 				"An optional timeout may be provided in seconds. TERM=dumb is injected, $profile loads automatically, and mise plus UTF-8 support are ready.",
 			promptSnippet: "Run PowerShell 7 commands",
-			promptGuidelines: [
-				"The bash tool runs pwsh7. Write PowerShell 7 syntax, not bash/sh: set environment variables with `$env:NAME = 'x'` (not `export`), continue lines with a backtick (not `\\`), test paths with `Test-Path` (not `[ -f ]`), and invoke executables whose paths contain spaces with `& 'C:\\path\\app.exe' arg`.",
-				"For searching, prefer the installed CLI tools: use `fd` to find files (for example, `fd -e md` for all Markdown files, not `find`) and `rg` to search content (not `grep` or `Select-String`). Limit output with `Select-Object -First N` / `-Last N` (not `head` / `tail`; `Get-Content -TotalCount N` / `-Tail N` also works), count lines with `(Get-Content f | Measure-Object -Line).Lines` (not `wc -l`), and locate commands with `(Get-Command name).Source` (not `which`).",
-				"Pass multiline arguments to native executables, such as Git commit messages, with a here-string: `@'...'@` does not expand variables, while `@\"...\"@` does. The closing marker `'@` / `\"@` must begin at column 1 or PowerShell will report an error.",
-				"Use `$(cmd)` for command substitution. PowerShell 7 supports `&&` and `||`; pipelines pass objects rather than text.",
-				"Run .ps1 files with pwsh.exe (not powershell.exe) and .sh files with sh.exe (not bash.exe).",
-			],
+			promptGuidelines: BASH_PROMPT_GUIDELINES,
 		});
 	});
 }
