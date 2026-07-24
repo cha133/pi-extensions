@@ -73,7 +73,12 @@ If VS Code shows stale type errors after dependency changes:
 
 ## Git
 
-- Commit messages: imperative mood, subject <= ~72 chars, blank line, bullet body.
+- Historical commits do not consistently follow [Conventional Commits
+  1.0.0](https://www.conventionalcommits.org/en/v1.0.0/), but all future
+  commits must. Use the specification's `<type>[optional scope]: <description>`
+  format (for example, `feat: add image fallback`, `fix(edit): preserve BOM`,
+  or `chore: update dependencies`) and follow its rules for bodies, footers,
+  and breaking changes.
 - Line endings: repo is LF; git may warn about LF→CRLF on Windows -- safe to ignore.
 
 ## Platform
