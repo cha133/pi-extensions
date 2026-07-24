@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { complete, type ImageContent, type UserMessage } from "@earendil-works/pi-ai/compat";
+import { Type } from "typebox";
 import {
 	createReadToolDefinition,
 	CONFIG_DIR_NAME,
@@ -24,10 +25,30 @@ import {
  * and returns the description as the read result.
  */
 
-const SYSTEM_PROMPT =
-	"You are an expert visual analyst. Describe the supplied image accurately and thoroughly. " +
-	"Cover the main subjects, setting, composition, colors, spatial relationships, and notable details. " +
-	"Transcribe visible text exactly. Do not add interpretations that are not supported by the image.";
+const SYSTEM_PROMPTS = {
+	brief:
+		"You are a concise visual analyst. Answer in 1-2 short sentences. " +
+		"Focus only on the requested subject or the most important visible content.",
+	standard:
+		"You are a careful visual analyst. Answer the request accurately with enough visible detail to be useful. " +
+		"Cover relevant subjects, setting, composition, colors, spatial relationships, and text. " +
+		"Do not add interpretations that are not supported by the image.",
+	detailed:
+		"You are an expert visual analyst. Give an exhaustive, precise answer grounded in the supplied image. " +
+		"Cover all details relevant to the request, including background, composition, colors, lighting, textures, " +
+		"spatial relationships, subtle elements, and exact transcription of visible text.",
+} as const;
+
+type ImageDetail = keyof typeof SYSTEM_PROMPTS;
+
+export interface ImageReadOptions {
+	/** Natural-language question or instruction for the image. */
+	query?: string;
+	/** Requested depth of the visual response. */
+	detail?: ImageDetail;
+	/** Natural-language region to prioritize, such as "upper-right corner". */
+	region?: string;
+}
 
 interface VisionConfig {
 	provider: string;
@@ -114,6 +135,15 @@ export function needsVisionFallback(result: NativeReadLikeResult, model: ModelWi
 	return !modelSupportsImages(model) && result.content.some((part) => part.type === "image");
 }
 
+export function buildVisionPrompt(options: ImageReadOptions | undefined): string {
+	const query = options?.query?.trim() || "Describe this image accurately.";
+	const region = options?.region?.trim();
+	if (!region) {
+		return query;
+	}
+	return [`Focus region: ${region}`, "", `Request: ${query}`].join("\n");
+}
+
 function findImage(result: NativeReadLikeResult): ImageContent | undefined {
 	return result.content.find((part): part is ImageContent => part.type === "image");
 }
@@ -127,6 +157,7 @@ function fallbackFailure(message: string): { content: [{ type: "text"; text: str
 
 async function describeImage(
 	image: ImageContent,
+	options: ImageReadOptions | undefined,
 	signal: AbortSignal | undefined,
 	ctx: ExtensionContext,
 ): Promise<{ content: [{ type: "text"; text: string }]; details: ReadToolDetails | undefined }> {
@@ -156,7 +187,7 @@ async function describeImage(
 	const userMessage: UserMessage = {
 		role: "user",
 		content: [
-			{ type: "text", text: "Describe this image in detail." },
+			{ type: "text", text: buildVisionPrompt(options) },
 			image,
 		],
 		timestamp: Date.now(),
@@ -165,7 +196,7 @@ async function describeImage(
 	try {
 		const response = await complete(
 			model,
-			{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+			{ systemPrompt: SYSTEM_PROMPTS[options?.detail ?? "standard"], messages: [userMessage] },
 			{
 				apiKey: auth.apiKey,
 				headers: auth.headers,
@@ -225,22 +256,51 @@ export default function (pi: ExtensionAPI) {
 			autoResizeImages: settingsManager.getImageAutoResize(),
 		});
 		const nativeExecute = nativeRead.execute;
+		const parameters = Type.Object({
+			...nativeRead.parameters.properties,
+			image: Type.Optional(
+				Type.Object({
+					query: Type.Optional(
+						Type.String({
+							description:
+								"Natural-language question or instruction for the image, such as asking what text appears",
+						}),
+					),
+					detail: Type.Optional(
+						Type.Union([Type.Literal("brief"), Type.Literal("standard"), Type.Literal("detailed")], {
+							description: "Visual response depth; defaults to standard",
+						}),
+					),
+					region: Type.Optional(
+						Type.String({
+							description:
+								'Natural-language area to prioritize, such as "upper-right corner" or "the red dialog"',
+						}),
+					),
+				}),
+			),
+		});
 
 		pi.registerTool({
 			...nativeRead,
+			parameters,
 			description: nativeRead.description.replace(
 				"Images are sent as attachments.",
 				"Images are automatically sent either to the current model when it supports image input " +
-					"or to the configured fallback vision model.",
+					"or to the configured fallback vision model. For image questions, response depth, or regional " +
+					"focus, pass the optional image.query, image.detail, and image.region fields.",
 			),
 			promptSnippet: "Read text files and inspect images with automatic vision fallback",
 			promptGuidelines: [
 				...(nativeRead.promptGuidelines ?? []),
 				"Use read for both text files and local images.",
+				"When the user asks a specific question about an image, pass it in image.query.",
+				"Use image.region for a natural-language area to prioritize and image.detail when response depth matters.",
 				"Do not look for or call a separate image-viewing tool; read automatically routes images to a capable model.",
 			],
 			async execute(toolCallId, params, signal, onUpdate, toolCtx) {
-				const result = await nativeExecute(toolCallId, params, signal, onUpdate, toolCtx);
+				const { image: imageOptions, ...nativeParams } = params;
+				const result = await nativeExecute(toolCallId, nativeParams, signal, onUpdate, toolCtx);
 				if (!needsVisionFallback(result, toolCtx.model)) {
 					return result;
 				}
@@ -249,7 +309,7 @@ export default function (pi: ExtensionAPI) {
 				if (!image) {
 					return result;
 				}
-				return describeImage(image, signal, toolCtx);
+				return describeImage(image, imageOptions, signal, toolCtx);
 			},
 		});
 	});

@@ -60,6 +60,26 @@ the description. Trusted project settings may override either value with a
 call, so changing the selected model does not require `/reload`. Changes to
 pi's model or provider configuration may still require `/reload`.
 
+For targeted image analysis, `read` also accepts an optional `image` object:
+
+```json
+{
+  "path": "screenshot.png",
+  "image": {
+    "query": "What does the red error message say?",
+    "detail": "detailed",
+    "region": "lower-right corner"
+  }
+}
+```
+
+`query` is a natural-language question or instruction, `detail` is `brief`,
+`standard`, or `detailed`, and `region` is a natural-language area to
+prioritize. When the current model supports images, pi's native image result is
+left untouched and these arguments remain visible in the tool call context.
+For text-only current models, the extension sends them to the configured
+fallback vision model.
+
 ## Develop
 
 ```bash

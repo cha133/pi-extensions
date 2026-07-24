@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import registerRead, { needsVisionFallback, resolveVisionConfig } from "../extensions/read.ts";
+import registerRead, {
+	buildVisionPrompt,
+	needsVisionFallback,
+	resolveVisionConfig,
+} from "../extensions/read.ts";
 
 describe("read vision settings", () => {
 	test("reads a provider and model from the vision object", () => {
@@ -55,6 +59,27 @@ describe("read vision fallback routing", () => {
 	});
 });
 
+describe("read image query prompts", () => {
+	test("uses a general description when no image query is provided", () => {
+		expect(buildVisionPrompt(undefined)).toBe("Describe this image accurately.");
+	});
+
+	test("preserves natural-language queries", () => {
+		expect(buildVisionPrompt({ query: "Transcribe the dialog exactly." })).toBe(
+			"Transcribe the dialog exactly.",
+		);
+	});
+
+	test("combines a semantic region with the requested analysis", () => {
+		expect(
+			buildVisionPrompt({
+				query: "What does the error say?",
+				region: "lower-right red dialog",
+			}),
+		).toBe("Focus region: lower-right red dialog\n\nRequest: What does the error say?");
+	});
+});
+
 describe("read override registration", () => {
 	test("replaces read with one truthful, always-visible tool", () => {
 		let sessionStart;
@@ -74,5 +99,8 @@ describe("read override registration", () => {
 		expect(registered.name).toBe("read");
 		expect(registered.promptSnippet).toContain("automatic vision fallback");
 		expect(registered.promptGuidelines.join("\n")).toContain("Do not look for or call a separate image-viewing tool");
+		expect(registered.parameters.properties.image.properties).toHaveProperty("query");
+		expect(registered.parameters.properties.image.properties).toHaveProperty("detail");
+		expect(registered.parameters.properties.image.properties).toHaveProperty("region");
 	});
 });
