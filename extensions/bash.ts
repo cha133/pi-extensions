@@ -17,7 +17,9 @@ const PWSH = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
  * Everything else (execution, 50 KB/2,000-line truncation, stream throttling, TUI
  * rendering, timeouts, and process-tree termination) reuses the built-in implementation.
  */
-export default function (pi: ExtensionAPI) {
+export function registerBash(pi: ExtensionAPI, platform: NodeJS.Platform = process.platform) {
+	if (platform !== "win32") return;
+
 	pi.on("session_start", async (_event, ctx) => {
 		const base = createBashTool(ctx.cwd, {
 			shellPath: PWSH,
@@ -45,4 +47,8 @@ export default function (pi: ExtensionAPI) {
 			],
 		});
 	});
+}
+
+export default function (pi: ExtensionAPI) {
+	registerBash(pi);
 }
