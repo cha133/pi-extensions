@@ -1,8 +1,8 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { complete, type ImageContent, type UserMessage } from "@earendil-works/pi-ai/compat";
 import {
 	createReadToolDefinition,
+	CONFIG_DIR_NAME,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	getAgentDir,
@@ -19,11 +19,10 @@ import {
  * The native read definition still owns path resolution, text handling, image
  * detection, image resizing, truncation, and rendering. When it returns an
  * image that the current model cannot consume, this wrapper sends that already
- * processed image to the vision model selected in ~/.pi/agent/view-image.json
+ * processed image to the vision model selected by the `vision` object in
+ * ~/.pi/agent/settings.json
  * and returns the description as the read result.
  */
-
-const CONFIG_FILE = "view-image.json";
 
 const SYSTEM_PROMPT =
 	"You are an expert visual analyst. Describe the supplied image accurately and thoroughly. " +
@@ -35,6 +34,10 @@ interface VisionConfig {
 	model: string;
 }
 
+interface SettingsWithVision {
+	vision?: unknown;
+}
+
 interface ModelWithInputs {
 	input?: readonly string[];
 }
@@ -43,53 +46,64 @@ interface NativeReadLikeResult {
 	content: Array<{ type: string }>;
 }
 
-function configPath(): string {
-	return join(getAgentDir(), CONFIG_FILE);
+function settingsPath(): string {
+	return join(getAgentDir(), "settings.json");
 }
 
-async function loadVisionConfig(): Promise<VisionConfig> {
-	const path = configPath();
-	let raw: string;
-	try {
-		raw = await readFile(path, "utf8");
-	} catch (error: unknown) {
-		const code =
-			typeof error === "object" && error !== null && "code" in error
-				? String((error as { code?: unknown }).code)
-				: undefined;
-		if (code === "ENOENT") {
-			throw new Error(
-				`Vision fallback is not configured. Create "${path}" with ` +
-					'{"provider":"<provider>","model":"<model-id>"}.',
-			);
-		}
-		throw new Error(
-			`Could not read vision fallback config "${path}": ${error instanceof Error ? error.message : String(error)}`,
-		);
+function readVisionObject(value: unknown, source: string): Record<string, unknown> | undefined {
+	if (value === undefined) {
+		return undefined;
 	}
-
-	let value: unknown;
-	try {
-		value = JSON.parse(raw);
-	} catch (error: unknown) {
-		throw new Error(
-			`Invalid JSON in vision fallback config "${path}": ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
-
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error(`Vision fallback config "${path}" must be a JSON object.`);
+		throw new Error(`The "vision" setting in ${source} must be a JSON object.`);
 	}
+	return value as Record<string, unknown>;
+}
 
-	const config = value as { provider?: unknown; model?: unknown };
+export function resolveVisionConfig(
+	globalValue: unknown,
+	projectValue: unknown,
+	globalSource = "global settings",
+	projectSource = "project settings",
+): VisionConfig {
+	const globalVision = readVisionObject(globalValue, globalSource);
+	const projectVision = readVisionObject(projectValue, projectSource);
+	const config = { ...(globalVision ?? {}), ...(projectVision ?? {}) };
+
+	if (!globalVision && !projectVision) {
+		throw new Error(
+			`Vision fallback is not configured. Add ` +
+				`"vision": {"provider":"<provider>","model":"<model-id>"} to "${settingsPath()}".`,
+		);
+	}
 	if (typeof config.provider !== "string" || !config.provider.trim()) {
-		throw new Error(`Vision fallback config "${path}" must contain a non-empty string "provider".`);
+		throw new Error('The "vision" setting must contain a non-empty string "provider".');
 	}
 	if (typeof config.model !== "string" || !config.model.trim()) {
-		throw new Error(`Vision fallback config "${path}" must contain a non-empty string "model".`);
+		throw new Error('The "vision" setting must contain a non-empty string "model".');
 	}
 
 	return { provider: config.provider.trim(), model: config.model.trim() };
+}
+
+function loadVisionConfig(ctx: ExtensionContext): VisionConfig {
+	const settingsManager = SettingsManager.create(ctx.cwd, getAgentDir(), {
+		projectTrusted: ctx.isProjectTrusted(),
+	});
+	const errors = settingsManager.drainErrors();
+	if (errors.length > 0) {
+		const summary = errors.map(({ scope, error }) => `${scope}: ${error.message}`).join("; ");
+		throw new Error(`Could not load pi settings: ${summary}`);
+	}
+
+	const globalSettings = settingsManager.getGlobalSettings() as SettingsWithVision;
+	const projectSettings = settingsManager.getProjectSettings() as SettingsWithVision;
+	return resolveVisionConfig(
+		globalSettings.vision,
+		projectSettings.vision,
+		settingsPath(),
+		join(ctx.cwd, CONFIG_DIR_NAME, "settings.json"),
+	);
 }
 
 function modelSupportsImages(model: ModelWithInputs | undefined): boolean {
@@ -118,7 +132,7 @@ async function describeImage(
 ): Promise<{ content: [{ type: "text"; text: string }]; details: ReadToolDetails | undefined }> {
 	let config: VisionConfig;
 	try {
-		config = await loadVisionConfig();
+		config = loadVisionConfig(ctx);
 	} catch (error: unknown) {
 		return fallbackFailure(error instanceof Error ? error.message : String(error));
 	}
@@ -127,7 +141,7 @@ async function describeImage(
 	const model = ctx.modelRegistry.find(config.provider, config.model);
 	if (!model) {
 		return fallbackFailure(
-			`configured model "${modelName}" was not found; check "${configPath()}" and reload pi after model changes`,
+			`configured model "${modelName}" was not found; check "${settingsPath()}" and reload pi after model changes`,
 		);
 	}
 	if (!modelSupportsImages(model)) {

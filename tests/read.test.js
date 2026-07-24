@@ -1,5 +1,34 @@
 import { describe, expect, test } from "bun:test";
-import registerRead, { needsVisionFallback } from "../extensions/read.ts";
+import registerRead, { needsVisionFallback, resolveVisionConfig } from "../extensions/read.ts";
+
+describe("read vision settings", () => {
+	test("reads a provider and model from the vision object", () => {
+		expect(resolveVisionConfig({ provider: "wps", model: "kimi" }, undefined)).toEqual({
+			provider: "wps",
+			model: "kimi",
+		});
+	});
+
+	test("merges trusted project vision fields over global settings", () => {
+		expect(
+			resolveVisionConfig(
+				{ provider: "wps", model: "global-model" },
+				{ model: "project-model" },
+			),
+		).toEqual({
+			provider: "wps",
+			model: "project-model",
+		});
+	});
+
+	test("rejects missing or malformed vision settings", () => {
+		expect(() => resolveVisionConfig(undefined, undefined)).toThrow("Vision fallback is not configured");
+		expect(() => resolveVisionConfig("wps/kimi", undefined)).toThrow('must be a JSON object');
+		expect(() => resolveVisionConfig({ provider: "wps" }, undefined)).toThrow(
+			'must contain a non-empty string "model"',
+		);
+	});
+});
 
 describe("read vision fallback routing", () => {
 	const textResult = {

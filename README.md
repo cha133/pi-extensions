@@ -28,19 +28,21 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 | `bash` | PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` (edit the path if needed) |
 | `bun` | `bun` on PATH |
 | `edit` | None (no extra runtime deps; reuses pi's `diff` package) |
-| `read` | `~/.pi/agent/view-image.json` selecting the fallback used when the current model cannot consume images |
+| `read` | A `vision` model configured in `~/.pi/agent/settings.json` for use when the current model cannot consume images |
 | `codegraph` | `codegraph` CLI on PATH; a project must be indexed (`codegraph init`) for queries to work |
 | `web-search` | Network access to `https://mcp.exa.ai/mcp` |
 
 ### Configure image fallback for `read`
 
-Choose any image-capable model already configured in pi and create
-`~/.pi/agent/view-image.json`:
+Choose any image-capable model already configured in pi and add a `vision`
+object to `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "provider": "google",
-  "model": "gemini-2.5-flash"
+  "vision": {
+    "provider": "google",
+    "model": "gemini-2.5-flash"
+  }
 }
 ```
 
@@ -53,9 +55,10 @@ environment variables. The extension does not store a separate API key.
 For text files, and for images when the current model already supports image
 input, `read` delegates to pi's native implementation. Otherwise it sends the
 native reader's processed image to the configured fallback model and returns
-the description. The configuration file is read on every fallback call, so
-changing the selected model does not require `/reload`. Changes to pi's model
-or provider configuration may still require `/reload`.
+the description. Trusted project settings may override either value with a
+`vision` object in `.pi/settings.json`. Settings are read on every fallback
+call, so changing the selected model does not require `/reload`. Changes to
+pi's model or provider configuration may still require `/reload`.
 
 ## Develop
 
