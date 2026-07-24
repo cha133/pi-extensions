@@ -41,6 +41,7 @@ import {
 	generateDiffString,
 	generateUnifiedPatch,
 } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { access, readFile, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
@@ -360,6 +361,12 @@ interface Match {
 	strategy: string;
 }
 
+interface EditDetails {
+	diff: string;
+	patch: string;
+	firstChangedLine?: number;
+}
+
 const NAMED_REPLACERS: Array<{ name: string; replacer: Replacer }> = [
 	{ name: "exact", replacer: ExactReplacer },
 	{ name: "line-trimmed", replacer: LineTrimmedReplacer },
@@ -430,11 +437,27 @@ export function findMatch(content: string, oldText: string, path: string): Match
 	throw new Error(`Found multiple matches for oldText in ${path}. Provide more surrounding context to make it unique.`);
 }
 
+function renderEditDiff(
+	diff: string,
+	theme: { fg: (color: "toolDiffAdded" | "toolDiffRemoved" | "toolDiffContext", text: string) => string },
+): string {
+	return diff
+		.split("\n")
+		.map((line) => {
+			const expanded = line.replace(/\t/g, "   ");
+			if (line.startsWith("+")) return theme.fg("toolDiffAdded", expanded);
+			if (line.startsWith("-")) return theme.fg("toolDiffRemoved", expanded);
+			return theme.fg("toolDiffContext", expanded);
+		})
+		.join("\n");
+}
+
 // ---------------------------------------------------------------------------
 // Diff generation directly reuses Pi's built-in edit-diff.ts helpers. This keeps TUI
-// rendering, line positioning, and patch formatting identical to the native edit tool.
-// Pi re-exports them from @earendil-works/pi-coding-agent so the extension can resolve
-// the helpers and their diff dependency in Pi's module context.
+// line positioning and patch formatting aligned with the native edit tool. Rendering is
+// intentionally local: inheriting the built-in edit renderer would run its exact-match
+// preview against this extension's fuzzy-match arguments and display a transient,
+// duplicate error before the real tool result.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -457,6 +480,38 @@ export default function (pi: ExtensionAPI): void {
 			"oldText must not be empty and must differ from newText.",
 		],
 		executionMode: "sequential", // Serialize calls to avoid concurrent writes to the same file.
+		renderShell: "default",
+
+		renderCall(args, theme) {
+			const path = typeof args.path === "string" ? args.path : "";
+			const title = theme.fg("toolTitle", theme.bold("edit"));
+			return new Text(`${title} ${theme.fg("accent", path)}`, 0, 0);
+		},
+
+		renderResult(result, { isPartial }, theme, context) {
+			const component = new Container();
+			if (isPartial) return component;
+
+			const text = result.content
+				.filter((item) => item.type === "text")
+				.map((item) => item.text)
+				.join("\n");
+			const details = result.details as EditDetails | undefined;
+			const output = context.isError
+				? text
+					? theme.fg("error", text)
+					: ""
+				: details?.diff
+					? renderEditDiff(details.diff, theme)
+					: text
+						? theme.fg("toolOutput", text)
+						: "";
+			if (!output) return component;
+
+			component.addChild(new Spacer(1));
+			component.addChild(new Text(output, 0, 0));
+			return component;
+		},
 
 		async execute(_toolCallId, input, signal, _onUpdate, ctx) {
 			const args = input as { path?: string; oldText?: string; newText?: string };

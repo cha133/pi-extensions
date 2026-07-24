@@ -6,7 +6,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 |-----------|------------------|
 | `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
 | `bun.ts` | Adds system-prompt guidance to move non-trivial shell logic into temporary TypeScript/JavaScript scripts run with Bun; registers no tool |
-| `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> LineTrimmed -> WhitespaceNorm -> IndentFlexible -> EscapeNorm -> PartialLineIndent -> BlockAnchor), ported from opencode and extended for partial-line indentation differences |
+| `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> LineTrimmed -> WhitespaceNorm -> IndentFlexible -> EscapeNorm -> PartialLineIndent -> BlockAnchor), plus a matching-aware renderer that avoids the built-in exact preview |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
 | `view-image.ts` | `view_image` - MiMo vision for text-only models; hidden when the active model already accepts images |

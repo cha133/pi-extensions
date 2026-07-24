@@ -26,7 +26,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 |------|------|-------|
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
 | _(none)_ | bun.ts | Adds system-prompt guidance via `before_agent_start`: move non-trivial shell logic into a temporary TypeScript/JavaScript script under `$env:TEMP`, then run it with `bun run`. |
-| `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → LineTrimmed → WhitespaceNorm → IndentFlexible → EscapeNorm → PartialLineIndent → BlockAnchor) ported from opencode and extended for partial-line indentation differences. Separate calls run sequentially; preserves BOM + EOL. |
+| `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → LineTrimmed → WhitespaceNorm → IndentFlexible → EscapeNorm → PartialLineIndent → BlockAnchor). Owns its renderer so pi does not run the built-in exact-match preview against fuzzy arguments. Separate calls run sequentially; preserves BOM + EOL. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
 | `web_fetch` | web-search.ts | Same Exa MCP, fetches URL bodies. Call after `web_search`. |

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { findMatch } from "../extensions/edit.ts";
+import registerEdit, { findMatch } from "../extensions/edit.ts";
 
 describe("partial-line indentation matching", () => {
 	const firstLine =
@@ -86,5 +86,45 @@ describe("partial-line indentation matching", () => {
 		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
 			"The first line of oldText appears to be a line fragment",
 		);
+	});
+});
+
+describe("edit rendering", () => {
+	test("uses extension-owned renderers instead of the built-in exact preview", () => {
+		let definition;
+		registerEdit({
+			registerTool(tool) {
+				definition = tool;
+			},
+		});
+
+		expect(definition.renderShell).toBe("default");
+		expect(definition.renderCall).toBeFunction();
+		expect(definition.renderResult).toBeFunction();
+	});
+
+	test("renders one final error inside the shared tool shell", () => {
+		let definition;
+		registerEdit({
+			registerTool(tool) {
+				definition = tool;
+			},
+		});
+		const theme = {
+			bold: (text) => text,
+			fg: (_color, text) => text,
+		};
+		const context = {
+			isError: true,
+		};
+		const component = definition.renderResult(
+			{ content: [{ type: "text", text: "Could not find oldText." }], details: {} },
+			{ expanded: false, isPartial: false },
+			theme,
+			context,
+		);
+		const rendered = component.render(120).join("\n");
+
+		expect(rendered.match(/Could not find oldText\./g)).toHaveLength(1);
 	});
 });
