@@ -9,7 +9,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> LineTrimmed -> WhitespaceNorm -> IndentFlexible -> EscapeNorm -> PartialLineIndent -> BlockAnchor), plus a matching-aware renderer that avoids the built-in exact preview |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
-| `view-image.ts` | `view_image` - MiMo vision for text-only models; hidden when the active model already accepts images |
+| `view-image.ts` | `view_image` - configurable vision model for text-only models; hidden when the active model already accepts images |
 
 ## Install
 
@@ -30,7 +30,29 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 | `edit` | None (no extra runtime deps; reuses pi's `diff` package) |
 | `codegraph` | `codegraph` CLI on PATH; a project must be indexed (`codegraph init`) for queries to work |
 | `web-search` | Network access to `https://mcp.exa.ai/mcp` |
-| `view-image` | `MIMO_API_KEY` env var; calls `https://api.xiaomimimo.com/v1` with model `mimo-v2.5` |
+| `view-image` | `~/.pi/agent/view-image.json` containing a configured pi model, for example `{"provider":"google","model":"gemini-2.5-flash"}` |
+
+### Configure `view-image`
+
+Choose any image-capable model already configured in pi and create
+`~/.pi/agent/view-image.json`:
+
+```json
+{
+  "provider": "google",
+  "model": "gemini-2.5-flash"
+}
+```
+
+The `provider` and `model` values must identify a model available to pi, and
+that model must declare `"image"` in its supported inputs. `view_image` uses
+pi's model registry and existing authentication, including built-in providers,
+`~/.pi/agent/models.json`, `~/.pi/agent/auth.json`, OAuth, and provider
+environment variables. The extension does not store a separate API key.
+
+The configuration file is read on every `view_image` call, so changing the
+selected model does not require `/reload`. Changes to pi's model or provider
+configuration may still require `/reload`.
 
 ## Develop
 

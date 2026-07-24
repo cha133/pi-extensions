@@ -30,7 +30,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
 | `web_fetch` | web-search.ts | Same Exa MCP, fetches URL bodies. Call after `web_search`. |
-| `view_image` | view-image.ts | MiMo vision API (`MIMO_API_KEY`). Hidden when active model already accepts `image` input. |
+| `view_image` | view-image.ts | Uses the vision model selected in `~/.pi/agent/view-image.json` and pi-managed authentication. Hidden when the active model already accepts `image` input. |
 
 ## Conventions
 

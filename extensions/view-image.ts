@@ -1,9 +1,11 @@
 import { readFile } from "node:fs/promises";
-import { extname, isAbsolute, resolve } from "node:path";
+import { extname, isAbsolute, join, resolve } from "node:path";
+import { complete, type UserMessage } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
+	getAgentDir,
 	keyHint,
 	truncateHead,
 	type ExtensionAPI,
@@ -14,15 +16,14 @@ import { Text } from "@earendil-works/pi-tui";
 /**
  * view_image -- add vision support for text-only models (inspired by mcp-sight).
  *
- * - baseUrl and model are fixed to Xiaomi MiMo's OpenAI-compatible endpoint.
- * - apiKey is read from MIMO_API_KEY.
+ * - The vision provider and model are selected in ~/.pi/agent/view-image.json.
+ * - The model and its authentication are resolved through pi's model registry.
  * - If the current model already accepts "image" input, remove this tool from the active
  *   set. Keep it visible for text-only models. Synchronize on session_start/model_select.
  */
 
 const TOOL_NAME = "view_image";
-const BASE_URL = "https://api.xiaomimimo.com/v1";
-const MODEL = "mimo-v2.5";
+const CONFIG_FILE = "view-image.json";
 
 const MIME_MAP: Record<string, string> = {
 	".jpg": "image/jpeg",
@@ -87,8 +88,62 @@ type DetailLevel = "brief" | "standard" | "detailed";
 interface ViewImageDetails {
 	path: string;
 	detailLevel: DetailLevel;
+	model?: string;
 	truncated: boolean;
 	totalLines: number;
+}
+
+interface ViewImageConfig {
+	provider: string;
+	model: string;
+}
+
+function configPath(): string {
+	return join(getAgentDir(), CONFIG_FILE);
+}
+
+async function loadConfig(): Promise<ViewImageConfig> {
+	const path = configPath();
+	let raw: string;
+	try {
+		raw = await readFile(path, "utf8");
+	} catch (error: unknown) {
+		const code =
+			typeof error === "object" && error !== null && "code" in error
+				? String((error as { code?: unknown }).code)
+				: undefined;
+		if (code === "ENOENT") {
+			throw new Error(
+				`Vision model is not configured. Create "${path}" with ` +
+					'{"provider":"<provider>","model":"<model-id>"}.',
+			);
+		}
+		throw new Error(
+			`Could not read vision model config "${path}": ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+
+	let value: unknown;
+	try {
+		value = JSON.parse(raw);
+	} catch (error: unknown) {
+		throw new Error(
+			`Invalid JSON in vision model config "${path}": ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error(`Vision model config "${path}" must be a JSON object.`);
+	}
+	const config = value as { provider?: unknown; model?: unknown };
+	if (typeof config.provider !== "string" || !config.provider.trim()) {
+		throw new Error(`Vision model config "${path}" must contain a non-empty string "provider".`);
+	}
+	if (typeof config.model !== "string" || !config.model.trim()) {
+		throw new Error(`Vision model config "${path}" must contain a non-empty string "model".`);
+	}
+
+	return { provider: config.provider.trim(), model: config.model.trim() };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -142,6 +197,7 @@ export default function (pi: ExtensionAPI) {
 			const truncated = details?.truncated ?? false;
 			let summary = theme.fg("success", "View Image");
 			if (details?.detailLevel) summary += theme.fg("dim", ` · ${details.detailLevel}`);
+			if (details?.model) summary += theme.fg("dim", ` · ${details.model}`);
 			if (truncated) summary += theme.fg("warning", " · truncated");
 			summary += theme.fg("dim", ` (${keyHint("app.tools.expand", "expand")})`);
 			if (!expanded) return new Text(summary, 0, 0);
@@ -159,18 +215,62 @@ export default function (pi: ExtensionAPI) {
 		},
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
-			const apiKey = process.env.MIMO_API_KEY;
-			if (!apiKey) {
+			const detailLevel = (params.detail_level ?? "standard") as DetailLevel;
+			let config: ViewImageConfig;
+			try {
+				config = await loadConfig();
+			} catch (error: unknown) {
 				return {
 					content: [
 						{
 							type: "text",
-							text: "MIMO_API_KEY is not set. Configure the environment variable before calling view_image.",
+							text: error instanceof Error ? error.message : String(error),
 						},
 					],
 					details: {
 						path: params.image_path,
-						detailLevel: (params.detail_level ?? "standard") as DetailLevel,
+						detailLevel,
+						truncated: false,
+						totalLines: 1,
+					} satisfies ViewImageDetails,
+				};
+			}
+
+			const modelName = `${config.provider}/${config.model}`;
+			const model = ctx.modelRegistry.find(config.provider, config.model);
+			if (!model) {
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Configured vision model "${modelName}" was not found. ` +
+								`Check "${configPath()}" and ensure the model is available in pi.`,
+						},
+					],
+					details: {
+						path: params.image_path,
+						detailLevel,
+						model: modelName,
+						truncated: false,
+						totalLines: 1,
+					} satisfies ViewImageDetails,
+				};
+			}
+			if (!modelSupportsImage(model)) {
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Configured vision model "${modelName}" does not declare image input support. ` +
+								'Choose a model whose "input" includes "image".',
+						},
+					],
+					details: {
+						path: params.image_path,
+						detailLevel,
+						model: modelName,
 						truncated: false,
 						totalLines: 1,
 					} satisfies ViewImageDetails,
@@ -192,7 +292,8 @@ export default function (pi: ExtensionAPI) {
 					],
 					details: {
 						path: absPath,
-						detailLevel: (params.detail_level ?? "standard") as DetailLevel,
+						detailLevel,
+						model: modelName,
 						truncated: false,
 						totalLines: 1,
 					} satisfies ViewImageDetails,
@@ -214,14 +315,14 @@ export default function (pi: ExtensionAPI) {
 					],
 					details: {
 						path: absPath,
-						detailLevel: (params.detail_level ?? "standard") as DetailLevel,
+						detailLevel,
+						model: modelName,
 						truncated: false,
 						totalLines: 1,
 					} satisfies ViewImageDetails,
 				};
 			}
 
-			const detailLevel = (params.detail_level ?? "standard") as DetailLevel;
 			const systemPrompt = SYSTEM_PROMPTS[detailLevel];
 			let userPrompt = params.prompt || "Describe this image in detail.";
 			if (params.context) {
@@ -234,64 +335,81 @@ export default function (pi: ExtensionAPI) {
 				].join("\n");
 			}
 
-			const dataUrl = `data:${mediaType};base64,${buffer.toString("base64")}`;
-
 			try {
-				const res = await fetch(`${BASE_URL}/chat/completions`, {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						Authorization: `Bearer ${apiKey}`,
-					},
-					body: JSON.stringify({
-						model: MODEL,
-						messages: [
-							{ role: "system", content: systemPrompt },
-							{
-								role: "user",
-								content: [
-									{ type: "text", text: userPrompt },
-									{ type: "image_url", image_url: { url: dataUrl } },
-								],
-							},
-						],
-					}),
-					signal,
-				});
-
-				const payload = (await res.json()) as {
-					error?: { message?: string };
-					choices?: Array<{ message?: { content?: string | Array<{ type?: string; text?: string }> } }>;
-				};
-
-				if (!res.ok || payload.error) {
-					const msg = payload.error?.message ?? `${res.status} ${res.statusText}`;
+				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+				if (!auth.ok) {
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Vision model API error: ${msg}. Check MIMO_API_KEY and endpoint connectivity.`,
+								text: `Could not authenticate configured vision model "${modelName}": ${auth.error}`,
 							},
 						],
 						details: {
 							path: absPath,
 							detailLevel,
+							model: modelName,
 							truncated: false,
 							totalLines: 1,
 						} satisfies ViewImageDetails,
 					};
 				}
 
-				const rawContent = payload.choices?.[0]?.message?.content;
-				let text = "";
-				if (typeof rawContent === "string") {
-					text = rawContent;
-				} else if (Array.isArray(rawContent)) {
-					text = rawContent
-						.filter((part) => part.type === "text" && part.text)
-						.map((part) => part.text)
-						.join("\n");
+				const userMessage: UserMessage = {
+					role: "user",
+					content: [
+						{ type: "text", text: userPrompt },
+						{ type: "image", data: buffer.toString("base64"), mimeType: mediaType },
+					],
+					timestamp: Date.now(),
+				};
+				const response = await complete(
+					model,
+					{ systemPrompt, messages: [userMessage] },
+					{
+						apiKey: auth.apiKey,
+						headers: auth.headers,
+						env: auth.env,
+						signal,
+					},
+				);
+
+				if (response.stopReason === "aborted") {
+					return {
+						content: [{ type: "text", text: "Cancelled" }],
+						details: {
+							path: absPath,
+							detailLevel,
+							model: modelName,
+							truncated: false,
+							totalLines: 1,
+						} satisfies ViewImageDetails,
+					};
 				}
+				if (response.stopReason === "error") {
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Vision model "${modelName}" failed: ` +
+									(response.errorMessage ?? "the provider returned an unknown error"),
+							},
+						],
+						details: {
+							path: absPath,
+							detailLevel,
+							model: modelName,
+							truncated: false,
+							totalLines: 1,
+						} satisfies ViewImageDetails,
+					};
+				}
+
+				let text = response.content
+					.filter((part): part is { type: "text"; text: string } => part.type === "text")
+					.map((part) => part.text)
+					.join("\n");
 				if (!text) text = "(vision model returned no content)";
 
 				const t = truncateHead(text, {
@@ -303,6 +421,7 @@ export default function (pi: ExtensionAPI) {
 					details: {
 						path: absPath,
 						detailLevel,
+						model: modelName,
 						truncated: t.truncated,
 						totalLines: t.totalLines,
 					} satisfies ViewImageDetails,
@@ -314,6 +433,7 @@ export default function (pi: ExtensionAPI) {
 						details: {
 							path: absPath,
 							detailLevel,
+							model: modelName,
 							truncated: false,
 							totalLines: 1,
 						} satisfies ViewImageDetails,
@@ -325,12 +445,13 @@ export default function (pi: ExtensionAPI) {
 							type: "text",
 							text:
 								`Vision model request failed: ${err instanceof Error ? err.message : String(err)}. ` +
-								"Check MIMO_API_KEY and network connectivity.",
+								`Check the configuration for "${modelName}" and network connectivity.`,
 						},
 					],
 					details: {
 						path: absPath,
 						detailLevel,
+						model: modelName,
 						truncated: false,
 						totalLines: 1,
 					} satisfies ViewImageDetails,
