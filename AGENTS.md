@@ -43,6 +43,9 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
   The TUI shows an override warning; that's expected.
 - **One extension per file**, `export default function (pi: ExtensionAPI) { ... }`. Use
   `pi.registerTool({ name, label, description, parameters: Type.Object({...}), ... })`.
+- **Module comments**: start every extension file with a JSDoc comment that summarizes
+  the extension's purpose and important implementation behavior, before all imports.
+  Keep function-level JSDoc for details specific to that function.
 - **Parameter schemas**: TypeBox (`Type.Object`/`Type.String`/...). Never `zod`.
 - **Truncation**: reuse `truncateHead` from `@earendil-works/pi-coding-agent` for any
   tool output; cap at 2000 lines / 50KB (see `DEFAULT_MAX_LINES`/`DEFAULT_MAX_BYTES`).

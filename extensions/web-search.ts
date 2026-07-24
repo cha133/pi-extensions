@@ -1,13 +1,3 @@
-import { Type } from "typebox";
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	keyHint,
-	truncateHead,
-	type ExtensionAPI,
-} from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
-
 /**
  * Exa Web Search / Fetch -- call Exa's public MCP endpoint
  * (https://mcp.exa.ai/mcp) without an API key.
@@ -34,6 +24,16 @@ import { Text } from "@earendil-works/pi-tui";
  *   abort signal so Esc can cancel requests. Truncation affects the content sent to the
  *   LLM; renderResult independently shows a collapsed summary or the first N preview lines.
  */
+
+import { Type } from "typebox";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	keyHint,
+	truncateHead,
+	type ExtensionAPI,
+} from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 
 const ENDPOINT = "https://mcp.exa.ai/mcp";
 const PROTOCOL_VERSION = "2025-03-26";

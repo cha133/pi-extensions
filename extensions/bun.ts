@@ -1,3 +1,8 @@
+/**
+ * Bun guidance -- teach the agent to move non-trivial shell logic into temporary
+ * TypeScript or JavaScript files and execute them with Bun.
+ */
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const BUN_GUIDANCE = `## Bun scripts

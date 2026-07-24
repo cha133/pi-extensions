@@ -1,3 +1,13 @@
+/**
+ * Vision read -- override Pi's built-in reader with transparent vision fallback.
+ *
+ * The native read definition still owns path resolution, text handling, image
+ * detection, image resizing, truncation, and rendering. When it returns an
+ * image that the current model cannot consume, this wrapper sends that already
+ * processed image to the vision model selected by the `vision` object in
+ * ~/.pi/agent/settings.json and returns the description as the read result.
+ */
+
 import { join } from "node:path";
 import { complete, type ImageContent, type UserMessage } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
@@ -13,17 +23,6 @@ import {
 	type ExtensionContext,
 	type ReadToolDetails,
 } from "@earendil-works/pi-coding-agent";
-
-/**
- * read -- override pi's built-in reader with transparent vision fallback.
- *
- * The native read definition still owns path resolution, text handling, image
- * detection, image resizing, truncation, and rendering. When it returns an
- * image that the current model cannot consume, this wrapper sends that already
- * processed image to the vision model selected by the `vision` object in
- * ~/.pi/agent/settings.json
- * and returns the description as the read result.
- */
 
 const SYSTEM_PROMPTS = {
 	brief:

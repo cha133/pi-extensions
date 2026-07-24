@@ -1,3 +1,20 @@
+/**
+ * PowerShell bash -- override the built-in bash tool with PowerShell 7.
+ *
+ * shellPath points to pwsh7. Once overridden, the built-in settings lookup no longer
+ * supplies shellPath, so it must be passed explicitly.
+ *
+ * spawnHook injects TERM=dumb:
+ * 1. The guard at the top of $profile, `if ($env:TERM -eq 'dumb') { return }`, exits
+ *    early. This skips interactive setup such as starship, PSReadLine, and zoxide
+ *    while retaining UTF-8 configuration and mise activation.
+ * 2. Tools such as git and eza detect a dumb terminal and omit ANSI escape sequences.
+ *
+ * promptGuidelines remind the model to write PowerShell 7 rather than bash syntax.
+ * Everything else (execution, 50 KB/2,000-line truncation, stream throttling, TUI
+ * rendering, timeouts, and process-tree termination) reuses the built-in implementation.
+ */
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBashTool } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
@@ -52,19 +69,6 @@ export function resolvePwshPath(
 	});
 }
 
-/**
- * Override the built-in bash tool with PowerShell 7:
- * - shellPath points to pwsh7. Once overridden, the built-in settings lookup no longer
- *   supplies shellPath, so it must be passed explicitly.
- * - spawnHook injects TERM=dumb:
- *   1) The guard at the top of $profile, `if ($env:TERM -eq 'dumb') { return }`, exits
- *      early. This skips interactive setup such as starship, PSReadLine, and zoxide
- *      while retaining UTF-8 configuration and mise activation.
- *   2) Tools such as git and eza detect a dumb terminal and omit ANSI escape sequences.
- * - promptGuidelines remind the model to write PowerShell 7 rather than bash syntax.
- * Everything else (execution, 50 KB/2,000-line truncation, stream throttling, TUI
- * rendering, timeouts, and process-tree termination) reuses the built-in implementation.
- */
 export function registerBash(pi: ExtensionAPI, platform: NodeJS.Platform = process.platform) {
 	if (platform !== "win32") return;
 
