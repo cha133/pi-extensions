@@ -7,9 +7,9 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
 | `bun.ts` | Adds system-prompt guidance to move non-trivial shell logic into temporary TypeScript/JavaScript scripts run with Bun; registers no tool |
 | `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> LineTrimmed -> WhitespaceNorm -> IndentFlexible -> EscapeNorm -> PartialLineIndent -> BlockAnchor), plus a matching-aware renderer that avoids the built-in exact preview |
+| `read.ts` | **Overrides built-in `read`** while preserving its native behavior; images are automatically routed to the current model or a configured fallback vision model |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
-| `view-image.ts` | `view_image` - configurable vision model for text-only models; hidden when the active model already accepts images |
 
 ## Install
 
@@ -28,11 +28,11 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 | `bash` | PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` (edit the path if needed) |
 | `bun` | `bun` on PATH |
 | `edit` | None (no extra runtime deps; reuses pi's `diff` package) |
+| `read` | `~/.pi/agent/view-image.json` selecting the fallback used when the current model cannot consume images |
 | `codegraph` | `codegraph` CLI on PATH; a project must be indexed (`codegraph init`) for queries to work |
 | `web-search` | Network access to `https://mcp.exa.ai/mcp` |
-| `view-image` | `~/.pi/agent/view-image.json` containing a configured pi model, for example `{"provider":"google","model":"gemini-2.5-flash"}` |
 
-### Configure `view-image`
+### Configure image fallback for `read`
 
 Choose any image-capable model already configured in pi and create
 `~/.pi/agent/view-image.json`:
@@ -45,14 +45,17 @@ Choose any image-capable model already configured in pi and create
 ```
 
 The `provider` and `model` values must identify a model available to pi, and
-that model must declare `"image"` in its supported inputs. `view_image` uses
-pi's model registry and existing authentication, including built-in providers,
+that model must declare `"image"` in its supported inputs. The overridden
+`read` tool uses pi's model registry and existing authentication, including built-in providers,
 `~/.pi/agent/models.json`, `~/.pi/agent/auth.json`, OAuth, and provider
 environment variables. The extension does not store a separate API key.
 
-The configuration file is read on every `view_image` call, so changing the
-selected model does not require `/reload`. Changes to pi's model or provider
-configuration may still require `/reload`.
+For text files, and for images when the current model already supports image
+input, `read` delegates to pi's native implementation. Otherwise it sends the
+native reader's processed image to the configured fallback model and returns
+the description. The configuration file is read on every fallback call, so
+changing the selected model does not require `/reload`. Changes to pi's model
+or provider configuration may still require `/reload`.
 
 ## Develop
 

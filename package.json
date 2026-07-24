@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
   "version": "1.0.0",
-  "description": "Personal pi coding-agent extensions: Bun script guidance, web search via Exa MCP, bash/edit overrides (pwsh7, fuzzy edit), codegraph bridge, view_image for text-only models",
+  "description": "Personal pi coding-agent extensions: Bun script guidance, web search via Exa MCP, bash/edit/read overrides, codegraph bridge, and automatic vision fallback",
   "type": "module",
   "license": "MIT",
   "repository": {

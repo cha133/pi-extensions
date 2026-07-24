@@ -21,8 +21,7 @@
  * better than a collection of narrow tools. The other read-only codegraph tools
  * (search/callers/callees/impact/node/status/files) are intentionally not bridged.
  *
- * References: view-image.ts for the setActiveTools pattern and web-search.ts for the
- * hand-written MCP client's lazy-initialization pattern.
+ * Reference: web-search.ts for the hand-written MCP client's lazy-initialization pattern.
  */
 
 import { spawn, type ChildProcess } from "node:child_process";

@@ -13,9 +13,9 @@ extensions/        # one extension per .ts file, default-exported factory (pi: E
   bash.ts          # overrides built-in `bash` -> runs PowerShell 7 (pwsh.exe)
   bun.ts           # adds guidance to use temp Bun scripts for non-trivial shell logic
   edit.ts          # overrides built-in `edit` -> multi-strategy fuzzy matching
+  read.ts          # overrides built-in `read` -> native behavior + automatic vision fallback
   codegraph.ts     # bridges codegraph's codegraph_explore MCP tool into a native pi tool
   web-search.ts    # web_search + web_fetch via Exa public MCP (no API key)
-  view-image.ts    # view_image: vision for text-only models (hidden when model already reads images)
 package.json       # pi-package manifest + peerDeps (runtime) + devDeps (types/tsc only)
 tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 ```
@@ -27,17 +27,17 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
 | _(none)_ | bun.ts | Adds system-prompt guidance via `before_agent_start`: move non-trivial shell logic into a temporary TypeScript/JavaScript script under `$env:TEMP`, then run it with `bun run`. |
 | `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → LineTrimmed → WhitespaceNorm → IndentFlexible → EscapeNorm → PartialLineIndent → BlockAnchor). Owns its renderer so pi does not run the built-in exact-match preview against fuzzy arguments. Separate calls run sequentially; preserves BOM + EOL. |
+| `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition` so native text/image handling and rendering remain intact. When the current model cannot consume the native image result, routes it through the model selected in `~/.pi/agent/view-image.json`. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
 | `web_fetch` | web-search.ts | Same Exa MCP, fetches URL bodies. Call after `web_search`. |
-| `view_image` | view-image.ts | Uses the vision model selected in `~/.pi/agent/view-image.json` and pi-managed authentication. Hidden when the active model already accepts `image` input. |
 
 ## Conventions
 
-- **File naming**: multi-word concepts are hyphenated (`web-search.ts`, `view-image.ts`);
+- **File naming**: multi-word concepts are hyphenated (`web-search.ts`);
   single concepts are bare (`bash.ts`, `edit.ts`, `codegraph.ts`). "Web search" is two
   words -- never write `websearch`.
-- **Tool names**: lowercase + underscore (`web_search`, `view_image`, `codegraph_explore`).
+- **Tool names**: lowercase + underscore (`web_search`, `codegraph_explore`).
   Don't prefix provider names (`exa_` was dropped; the provider is an impl detail).
 - **Override built-ins** by registering a tool with the same `name` (e.g. `bash`, `edit`).
   The TUI shows an override warning; that's expected.
@@ -48,8 +48,8 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
   tool output; cap at 2000 lines / 50KB (see `DEFAULT_MAX_LINES`/`DEFAULT_MAX_BYTES`).
 - **Types**: `strict` mode. `result.details` from `registerTool` defaults to `unknown` --
   when reading custom fields in `renderResult`, define a local interface and cast
-  `result.details as Foo | undefined` (see `web-search.ts` `SearchDetails`, `view-image.ts`
-  `ViewImageDetails`). Don't rely on inference to `{}`/`unknown`.
+  `result.details as Foo | undefined` (see `web-search.ts` `SearchDetails`). Don't rely
+  on inference to `{}`/`unknown`.
 - **Runtime deps**: none beyond pi's peer deps + `typebox`. `@types/node` and `typescript`
   are `devDependencies` only (editor types / `tsc`); at runtime pi provides
   `@earendil-works/pi-*` and `typebox`. Keep extensions single-file and zero added deps.
