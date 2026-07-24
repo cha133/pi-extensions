@@ -66,19 +66,18 @@ For targeted image analysis, `read` also accepts an optional `image` object:
 {
   "path": "screenshot.png",
   "image": {
-    "query": "What does the red error message say?",
-    "detail": "detailed",
-    "region": "lower-right corner"
+    "query": "What does the red error message in the lower-right corner say?",
+    "detail": "detailed"
   }
 }
 ```
 
 `query` is a natural-language question or instruction, `detail` is `brief`,
-`standard`, or `detailed`, and `region` is a natural-language area to
-prioritize. When the current model supports images, pi's native image result is
-left untouched and these arguments remain visible in the tool call context.
-For text-only current models, the extension sends them to the configured
-fallback vision model.
+`standard`, or `detailed`. Areas to prioritize should be expressed directly in
+`query`. When the current model supports images, pi's native image result is
+left untouched and these arguments remain visible in the tool call context. For
+text-only current models, the extension sends them to the configured fallback
+vision model.
 
 ## Develop
 

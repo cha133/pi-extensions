@@ -46,8 +46,6 @@ export interface ImageReadOptions {
 	query?: string;
 	/** Requested depth of the visual response. */
 	detail?: ImageDetail;
-	/** Natural-language region to prioritize, such as "upper-right corner". */
-	region?: string;
 }
 
 interface VisionConfig {
@@ -136,12 +134,7 @@ export function needsVisionFallback(result: NativeReadLikeResult, model: ModelWi
 }
 
 export function buildVisionPrompt(options: ImageReadOptions | undefined): string {
-	const query = options?.query?.trim() || "Describe this image accurately.";
-	const region = options?.region?.trim();
-	if (!region) {
-		return query;
-	}
-	return [`Focus region: ${region}`, "", `Request: ${query}`].join("\n");
+	return options?.query?.trim() || "Describe this image accurately.";
 }
 
 function findImage(result: NativeReadLikeResult): ImageContent | undefined {
@@ -271,12 +264,6 @@ export default function (pi: ExtensionAPI) {
 							description: "Visual response depth; defaults to standard",
 						}),
 					),
-					region: Type.Optional(
-						Type.String({
-							description:
-								'Natural-language area to prioritize, such as "upper-right corner" or "the red dialog"',
-						}),
-					),
 				}),
 			),
 		});
@@ -287,15 +274,15 @@ export default function (pi: ExtensionAPI) {
 			description: nativeRead.description.replace(
 				"Images are sent as attachments.",
 				"Images are automatically sent either to the current model when it supports image input " +
-					"or to the configured fallback vision model. For image questions, response depth, or regional " +
-					"focus, pass the optional image.query, image.detail, and image.region fields.",
+					"or to the configured fallback vision model. Put image questions, instructions, and areas to " +
+					"focus in image.query; use image.detail to select the response depth.",
 			),
 			promptSnippet: "Read text files and inspect images with automatic vision fallback",
 			promptGuidelines: [
 				...(nativeRead.promptGuidelines ?? []),
 				"Use read for both text files and local images.",
 				"When the user asks a specific question about an image, pass it in image.query.",
-				"Use image.region for a natural-language area to prioritize and image.detail when response depth matters.",
+				"Include any area to prioritize in image.query, and use image.detail when response depth matters.",
 				"Do not look for or call a separate image-viewing tool; read automatically routes images to a capable model.",
 			],
 			async execute(toolCallId, params, signal, onUpdate, toolCtx) {

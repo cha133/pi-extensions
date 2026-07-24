@@ -70,13 +70,10 @@ describe("read image query prompts", () => {
 		);
 	});
 
-	test("combines a semantic region with the requested analysis", () => {
-		expect(
-			buildVisionPrompt({
-				query: "What does the error say?",
-				region: "lower-right red dialog",
-			}),
-		).toBe("Focus region: lower-right red dialog\n\nRequest: What does the error say?");
+	test("keeps regions inside the natural-language query", () => {
+		expect(buildVisionPrompt({ query: "What does the lower-right error say?" })).toBe(
+			"What does the lower-right error say?",
+		);
 	});
 });
 
@@ -101,6 +98,6 @@ describe("read override registration", () => {
 		expect(registered.promptGuidelines.join("\n")).toContain("Do not look for or call a separate image-viewing tool");
 		expect(registered.parameters.properties.image.properties).toHaveProperty("query");
 		expect(registered.parameters.properties.image.properties).toHaveProperty("detail");
-		expect(registered.parameters.properties.image.properties).toHaveProperty("region");
+		expect(registered.parameters.properties.image.properties).not.toHaveProperty("region");
 	});
 });
