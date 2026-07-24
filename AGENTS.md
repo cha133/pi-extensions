@@ -12,6 +12,7 @@ the human-facing overview see `README.md`; for exact behavior read the source.
 extensions/        # one extension per .ts file, default-exported factory (pi: ExtensionAPI) => void
   bash.ts          # overrides built-in `bash` -> runs PowerShell 7 (pwsh.exe)
   bun.ts           # adds guidance to use temp Bun scripts for non-trivial shell logic
+  datetime.ts      # persists and injects a fixed session-start date/time
   edit.ts          # overrides built-in `edit` -> multi-strategy fuzzy matching
   read.ts          # overrides built-in `read` -> native behavior + automatic vision fallback
   codegraph.ts     # bridges codegraph's codegraph_explore MCP tool into a native pi tool
@@ -26,6 +27,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 |------|------|-------|
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
 | _(none)_ | bun.ts | Adds system-prompt guidance via `before_agent_start`: move non-trivial shell logic into a temporary TypeScript/JavaScript script under `$env:TEMP`, then run it with `bun run`. |
+| _(none)_ | datetime.ts | Persists the session-start date/time in a custom session entry and appends the same value to the system prompt on every turn and resume. |
 | `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → IndentFlexible → LineTrimmed → WhitespaceNorm → EscapeNorm → PartialLineIndent → BlockAnchor). Owns its renderer so pi does not run the built-in exact-match preview against fuzzy arguments. Separate calls run sequentially; preserves BOM + EOL. |
 | `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition` so native text/image handling and rendering remain intact. When the current model cannot consume the native image result, routes it through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis without modifying native multimodal results. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
