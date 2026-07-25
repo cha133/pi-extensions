@@ -43,23 +43,14 @@ describe("pwsh path resolution", () => {
 });
 
 describe("bash platform registration", () => {
-	test("teaches rg file discovery without depending on fd", () => {
+	test("keeps its prompt guidance specific to PowerShell", () => {
 		const guidance = BASH_PROMPT_GUIDELINES.join("\n");
 
-		expect(guidance).toContain("`rg --files` to list files");
-		expect(guidance).toContain("`rg --files -g '*.md'`");
-		expect(guidance).toContain("`rg --files --hidden`");
-		expect(guidance).toContain("`--no-ignore`");
-		expect(guidance).toContain("`rg --files --hidden --no-ignore -g '!**/.git/**'`");
-		expect(guidance).not.toContain("`fd`");
-	});
-
-	test("warns that ripgrep -r replaces matches instead of enabling recursion", () => {
-		const guidance = BASH_PROMPT_GUIDELINES.join("\n");
-
-		expect(guidance).toContain("ripgrep searches directories recursively by default");
-		expect(guidance).toContain("`-r` means `--replace`");
-		expect(guidance).toContain("Use `rg -n PATTERN PATH`");
+		expect(guidance).toContain("The bash tool runs PowerShell 7, not bash/sh.");
+		expect(guidance).toContain("PowerShell pipelines pass objects rather than text.");
+		expect(guidance).toContain("real multiline here-string");
+		expect(guidance).not.toContain("ripgrep");
+		expect(guidance).not.toContain("`rg");
 	});
 
 	test("does not register on macOS or Linux", () => {
