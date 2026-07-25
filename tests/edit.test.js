@@ -209,6 +209,21 @@ describe("block-anchor matching", () => {
 });
 
 describe("edit rendering", () => {
+	test("exposes exactly one targeted replacement per call", () => {
+		let definition;
+		registerEdit({
+			registerTool(tool) {
+				definition = tool;
+			},
+		});
+
+		expect(Object.keys(definition.parameters.properties)).toEqual(["path", "oldText", "newText"]);
+		expect(definition.promptGuidelines.join("\n")).toContain(
+			"Each edit call performs exactly one oldText to newText replacement.",
+		);
+		expect(definition.executionMode).toBe("sequential");
+	});
+
 	test("uses extension-owned renderers instead of the built-in exact preview", () => {
 		let definition;
 		registerEdit({

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	BASH_PROMPT_GUIDELINES,
+	mergeBashPromptGuidelines,
 	registerBash,
 	resolvePwshPath,
 } from "../extensions/bash.ts";
@@ -51,6 +52,15 @@ describe("bash platform registration", () => {
 		expect(guidance).toContain("real multiline here-string");
 		expect(guidance).not.toContain("ripgrep");
 		expect(guidance).not.toContain("`rg");
+	});
+
+	test("preserves built-in non-shell guidance before PowerShell guidance", () => {
+		const inherited = "Inspect PI_* environment variables for current model and session details.";
+		const guidance = mergeBashPromptGuidelines([inherited]);
+
+		expect(guidance[0]).toBe(inherited);
+		expect(guidance.slice(1)).toEqual(BASH_PROMPT_GUIDELINES);
+		expect(mergeBashPromptGuidelines(undefined)).toEqual(BASH_PROMPT_GUIDELINES);
 	});
 
 	test("does not register on macOS or Linux", () => {

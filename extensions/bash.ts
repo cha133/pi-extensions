@@ -10,9 +10,10 @@
  *    while retaining UTF-8 configuration and mise activation.
  * 2. Tools such as git and eza detect a dumb terminal and omit ANSI escape sequences.
  *
- * promptGuidelines remind the model to write PowerShell 7 rather than bash syntax.
- * Everything else (execution, 50 KB/2,000-line truncation, stream throttling, TUI
- * rendering, timeouts, and process-tree termination) reuses the built-in implementation.
+ * promptGuidelines preserve the built-in non-shell guidance, then remind the model to
+ * write PowerShell 7 rather than bash syntax. Everything else (execution, 50 KB/2,000-line
+ * truncation, stream throttling, TUI rendering, timeouts, and process-tree termination)
+ * reuses the built-in implementation.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -50,6 +51,11 @@ export const BASH_PROMPT_GUIDELINES = [
 		"instead of choosing from its file extension alone.",
 	].join(" "),
 ];
+
+/** Preserve guidance supplied by pi's bash tool before adding PowerShell-specific rules. */
+export function mergeBashPromptGuidelines(baseGuidelines: readonly string[] | undefined): string[] {
+	return [...(baseGuidelines ?? []), ...BASH_PROMPT_GUIDELINES];
+}
 
 function getEnv(environment: NodeJS.ProcessEnv, name: string): string | undefined {
 	const match = Object.keys(environment).find((key) => key.toLowerCase() === name.toLowerCase());
@@ -117,6 +123,9 @@ export function registerBash(pi: ExtensionAPI, platform: NodeJS.Platform = proce
 				env: { ...env, TERM: "dumb" },
 			}),
 		});
+		const basePromptGuidelines = (
+			base as typeof base & { promptGuidelines?: readonly string[] }
+		).promptGuidelines;
 
 		pi.registerTool({
 			...base,
@@ -126,7 +135,7 @@ export function registerBash(pi: ExtensionAPI, platform: NodeJS.Platform = proce
 				"Output is truncated to the last 2,000 lines or 50 KB; overflow is saved to a temporary file whose path is included in the result. " +
 				"An optional timeout may be provided in seconds. TERM=dumb is injected, $profile loads automatically, and mise plus UTF-8 support are ready.",
 			promptSnippet: "Run PowerShell 7 commands",
-			promptGuidelines: BASH_PROMPT_GUIDELINES,
+			promptGuidelines: mergeBashPromptGuidelines(basePromptGuidelines),
 		});
 	});
 }

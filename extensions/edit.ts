@@ -24,9 +24,12 @@
  * and a clear margin over the runner-up.
  *
  * Like opencode and Claude Code, each call performs one oldText -> newText replacement.
- * Multiple changes should use separate calls, serialized by executionMode: "sequential".
- * A failed match then does not invalidate unrelated edits, and the model need not spend
- * time assembling a large edits array.
+ * This is an intentional reliability constraint rather than a missing batch feature.
+ * In observed use, reasoning-heavy models such as GLM-5.2 spent more than 120 seconds
+ * repeatedly planning a seven-location batch; one bad match then rejected the entire
+ * batch and triggered another full planning cycle. Separate calls, serialized by
+ * executionMode: "sequential", bound the reasoning and retry cost of each change so a
+ * failed match does not invalidate unrelated edits.
  *
  * Preserve the BOM and the file's original line endings. Diff generation reuses the same
  * `diff` package and display format as built-in edit-diff.ts, including line numbers,
