@@ -5,8 +5,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | Extension | Tools / behavior |
 |-----------|------------------|
 | `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
-| `bun.ts` | Adds system-prompt guidance to move non-trivial shell logic into temporary TypeScript/JavaScript scripts run with Bun; registers no tool |
-| `rg.ts` | Adds system-prompt guidance for ripgrep file discovery and content search, including hidden/ignored files and the `-r` replacement trap; registers no tool |
+| `shell-guidance.ts` | Adds system-prompt guidance to use ripgrep for discovery/search and move non-trivial shell logic into temporary Bun scripts; registers no tool |
 | `session-info.ts` | Captures the first user message's date/time and selected model, then reuses those fixed values after model switches and resume |
 | `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> IndentFlexible -> LineTrimmed -> WhitespaceNorm -> EscapeNorm -> PartialLineIndent -> BlockAnchor), plus a matching-aware renderer that avoids the built-in exact preview |
 | `read.ts` | **Overrides built-in `read`** while preserving its native behavior; images are automatically routed to the current model or a configured fallback vision model |
