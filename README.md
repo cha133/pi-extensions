@@ -7,7 +7,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
 | `bun.ts` | Adds system-prompt guidance to move non-trivial shell logic into temporary TypeScript/JavaScript scripts run with Bun; registers no tool |
 | `rg.ts` | Adds system-prompt guidance for ripgrep file discovery and content search, including hidden/ignored files and the `-r` replacement trap; registers no tool |
-| `datetime.ts` | Adds the session's start date and time to the system prompt once, then reuses the persisted value on later turns and resume |
+| `session-info.ts` | Captures the first user message's date/time and selected model, then reuses those fixed values after model switches and resume |
 | `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> IndentFlexible -> LineTrimmed -> WhitespaceNorm -> EscapeNorm -> PartialLineIndent -> BlockAnchor), plus a matching-aware renderer that avoids the built-in exact preview |
 | `read.ts` | **Overrides built-in `read`** while preserving its native behavior; images are automatically routed to the current model or a configured fallback vision model |
 | `advisor.ts` | `advisor` - lets the main model explicitly request a tool-free independent review, using either the current model or a configured higher-capability model |
@@ -31,7 +31,7 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 | `bash` | PowerShell 7 at `C:\Program Files\PowerShell\7\pwsh.exe` (edit the path if needed) |
 | `bun` | `bun` on PATH |
 | `rg` | `rg` on PATH |
-| `datetime` | None |
+| `session-info` | None |
 | `edit` | None (no extra runtime deps; reuses pi's `diff` package) |
 | `read` | A `vision` model configured in `~/.pi/agent/settings.json` for use when the current model cannot consume images |
 | `advisor` | None; optionally configure an `advisor` model in `~/.pi/agent/settings.json` |

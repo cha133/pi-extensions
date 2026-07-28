@@ -13,7 +13,7 @@ extensions/        # one extension per .ts file, default-exported factory (pi: E
   bash.ts          # overrides built-in `bash` -> runs PowerShell 7 (pwsh.exe)
   bun.ts           # adds guidance to use temp Bun scripts for non-trivial shell logic
   rg.ts            # adds guidance for ripgrep file discovery and content search
-  datetime.ts      # persists and injects a fixed session-start date/time
+  session-info.ts  # persists and injects fixed first-message time + first-turn model
   edit.ts          # overrides built-in `edit` -> multi-strategy fuzzy matching
   read.ts          # overrides built-in `read` -> native behavior + automatic vision fallback
   advisor.ts       # independent same-model review or configured higher-capability advice
@@ -30,7 +30,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
 | _(none)_ | bun.ts | Adds system-prompt guidance via `before_agent_start`: move non-trivial shell logic into a temporary TypeScript/JavaScript script under `$env:TEMP`, then run it with `bun run`. |
 | _(none)_ | rg.ts | Adds system-prompt guidance via `before_agent_start`: use ripgrep for file discovery and content search, including hidden/ignored file flags and the `-r` replacement trap. |
-| _(none)_ | datetime.ts | Persists the session-start date/time in a custom session entry and appends the same value to the system prompt on every turn and resume. |
+| _(none)_ | session-info.ts | Captures the first user message's date/time and selected model in one custom session entry, then appends the same fixed values to the system prompt on every turn and resume. |
 | `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → IndentFlexible → LineTrimmed → WhitespaceNorm → EscapeNorm → PartialLineIndent → BlockAnchor). Owns its renderer so pi does not run the built-in exact-match preview against fuzzy arguments. Separate calls run sequentially; preserves BOM + EOL. |
 | `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition` so native text/image handling and rendering remain intact. When the current model cannot consume the native image result, routes it through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis without modifying native multimodal results. |
 | `advisor` | advisor.ts | Gives the main model an explicit, tool-free consultation call. Defaults to an independent second pass by the current model; an `advisor` object in settings may select a different model, which is treated as a user-chosen higher-capability advisor. |
