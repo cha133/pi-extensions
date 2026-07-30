@@ -490,6 +490,13 @@ interface SubagentSessionOptions {
 
 export type SubagentSessionFactory = (options: SubagentSessionOptions) => Promise<AgentSession>;
 
+/** Start extension lifecycle hooks before the child agent receives its first task. */
+export async function bindSubagentExtensions(
+	session: Pick<AgentSession, "bindExtensions">,
+): Promise<void> {
+	await session.bindExtensions({});
+}
+
 /** Build a disposable, in-memory SDK session with the selected discovered tools. */
 async function createSdkSubagentSession(options: SubagentSessionOptions): Promise<AgentSession> {
 	const agentDir = getAgentDir();
@@ -513,6 +520,7 @@ async function createSdkSubagentSession(options: SubagentSessionOptions): Promis
 		resourceLoader,
 		sessionManager: SessionManager.inMemory(options.cwd),
 	});
+	await bindSubagentExtensions(session);
 	return session;
 }
 

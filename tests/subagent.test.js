@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import registerSubagent, {
+	bindSubagentExtensions,
 	createSubagentTool,
 	createSubagentParameters,
 	formatStatusLine,
@@ -174,6 +175,17 @@ describe("subagent progress", () => {
 
 describe("subagent SDK session", () => {
 	const model = { provider: "openai", id: "peer" };
+
+	test("starts extension lifecycle hooks before using a child session", async () => {
+		const bindings = [];
+		await bindSubagentExtensions({
+			async bindExtensions(value) {
+				bindings.push(value);
+			},
+		});
+
+		expect(bindings).toEqual([{}]);
+	});
 
 	function assistant(text, stopReason = "stop") {
 		return {
