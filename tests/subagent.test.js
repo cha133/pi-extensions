@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import registerSubagent, {
 	createSubagentParameters,
+	getPiInvocation,
 	isAdvisorAvailable,
 	isSameModel,
 	resolveSubagentSettings,
@@ -77,6 +78,37 @@ describe("subagent parameters", () => {
 		expect(schema.required).toEqual(["task"]);
 		expect(schema.properties.tier.default).toBe("peer");
 		expect(schema.properties.tier.anyOf.map((item) => item.const)).toEqual(["peer", "advisor"]);
+	});
+});
+
+describe("pi child invocation", () => {
+	test("does not pass a Windows Bun virtual script path as a prompt argument", () => {
+		const args = ["--mode", "json"];
+		const invocation = getPiInvocation(args, {
+			currentScript: "B:/~BUN/root/pi.exe",
+			execPath: "C:\\Scoop\\shims\\pi.exe",
+			fileExists: () => false,
+		});
+
+		expect(invocation).toEqual({
+			command: "C:\\Scoop\\shims\\pi.exe",
+			args,
+		});
+		expect(invocation.args).not.toContain("B:/~BUN/root/pi.exe");
+	});
+
+	test("keeps a real runtime script when pi is launched through Bun", () => {
+		const args = ["--mode", "json"];
+		const invocation = getPiInvocation(args, {
+			currentScript: "C:\\tools\\pi\\src\\main.ts",
+			execPath: "C:\\tools\\bun.exe",
+			fileExists: () => true,
+		});
+
+		expect(invocation).toEqual({
+			command: "C:\\tools\\bun.exe",
+			args: ["C:\\tools\\pi\\src\\main.ts", ...args],
+		});
 	});
 });
 

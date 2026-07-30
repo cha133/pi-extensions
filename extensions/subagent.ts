@@ -10,6 +10,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -257,16 +258,29 @@ export function createSubagentParameters(advisorAvailable: boolean) {
 	return Type.Object(properties);
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const currentScript = process.argv[1];
+interface PiInvocationRuntime {
+	currentScript: string | undefined;
+	execPath: string;
+	fileExists: (path: string) => boolean;
+}
+
+export function getPiInvocation(
+	args: string[],
+	runtime: PiInvocationRuntime = {
+		currentScript: process.argv[1],
+		execPath: process.execPath,
+		fileExists: existsSync,
+	},
+): { command: string; args: string[] } {
+	const { currentScript, execPath, fileExists } = runtime;
 	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript) {
-		return { command: process.execPath, args: [currentScript, ...args] };
+	if (currentScript && !isBunVirtualScript && fileExists(currentScript)) {
+		return { command: execPath, args: [currentScript, ...args] };
 	}
 
-	const executableName = basename(process.execPath).toLowerCase();
+	const executableName = basename(execPath).toLowerCase();
 	const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(executableName);
-	return isGenericRuntime ? { command: "pi", args } : { command: process.execPath, args };
+	return isGenericRuntime ? { command: "pi", args } : { command: execPath, args };
 }
 
 function appendBounded(current: string, chunk: string): string {
