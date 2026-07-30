@@ -1,9 +1,55 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import registerRead, {
 	buildVisionPrompt,
+	computeHashlineTag,
+	formatHashlineRead,
 	needsVisionFallback,
 	resolveVisionConfig,
 } from "../extensions/read.ts";
+import { computeHashlineTag as computeEditHashlineTag } from "../extensions/edit.ts";
+
+describe("read hashline formatting", () => {
+	test("uses the same normalized tag as edit", () => {
+		const content = "\uFEFFalpha\r\nbeta\r\n";
+		expect(computeHashlineTag(content)).toBe(computeEditHashlineTag(content));
+	});
+
+	test("emits a versioned header and one-indexed source lines", () => {
+		const content = "alpha\nbeta\ngamma\n";
+		const output = formatHashlineRead(content, { path: "src/example.ts" });
+
+		expect(output).toBe(
+			`[src/example.ts#${computeHashlineTag(content)}]\n1:alpha\n2:beta\n3:gamma`,
+		);
+	});
+
+	test("keeps original numbers for offset reads and reports continuation", () => {
+		const output = formatHashlineRead("one\ntwo\nthree\nfour\n", {
+			path: "x.txt",
+			offset: 2,
+			limit: 2,
+		});
+
+		expect(output).toContain("\n2:two\n3:three\n");
+		expect(output).toContain("1 more lines in file. Use offset=4");
+	});
+
+	test("does not expose a phantom line for a final newline", () => {
+		const output = formatHashlineRead("one\n", { path: "x.txt" });
+		expect(output).toContain("\n1:one");
+		expect(output).not.toContain("\n2:");
+	});
+
+	test("gives an insertion instruction for an empty file", () => {
+		const output = formatHashlineRead("", { path: "empty.txt" });
+		expect(output).toContain("[empty.txt#");
+		expect(output).toContain("File is empty");
+		expect(output).toContain("INS.HEAD");
+	});
+});
 
 describe("read vision settings", () => {
 	test("reads a provider and model from the vision object", () => {
@@ -94,10 +140,45 @@ describe("read override registration", () => {
 		sessionStart({}, { cwd: "C:\\workspace", isProjectTrusted: () => false });
 
 		expect(registered.name).toBe("read");
-		expect(registered.promptSnippet).toContain("automatic vision fallback");
+		expect(registered.promptSnippet).toContain("version-tagged text snapshots");
+		expect(registered.promptGuidelines.join("\n")).toContain("[PATH#TAG]");
 		expect(registered.promptGuidelines.join("\n")).toContain("Do not look for or call a separate image-viewing tool");
 		expect(registered.parameters.properties.image.properties).toHaveProperty("query");
 		expect(registered.parameters.properties.image.properties).toHaveProperty("detail");
 		expect(registered.parameters.properties.image.properties).not.toHaveProperty("region");
+	});
+
+	test("returns an editable hashline snapshot through the real native read path", async () => {
+		let sessionStart;
+		let registered;
+		const pi = {
+			on(event, handler) {
+				if (event === "session_start") sessionStart = handler;
+			},
+			registerTool(tool) {
+				registered = tool;
+			},
+		};
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-read-"));
+		const path = join(directory, "example.txt");
+		await writeFile(path, "alpha\r\nbeta\r\n", "utf8");
+
+		try {
+			registerRead(pi);
+			sessionStart({}, { cwd: directory, isProjectTrusted: () => false });
+			const result = await registered.execute(
+				"tool-call",
+				{ path: "example.txt" },
+				undefined,
+				undefined,
+				{ cwd: directory, model: { input: ["text"] } },
+			);
+
+			expect(result.content[0].text).toBe(
+				`[example.txt#${computeHashlineTag("alpha\nbeta\n")}]\n1:alpha\n2:beta`,
+			);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 });

@@ -7,8 +7,8 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
 | `shell-guidance.ts` | Adds system-prompt guidance to use ripgrep for discovery/search and move non-trivial shell logic into temporary Bun scripts; registers no tool |
 | `session-info.ts` | Captures the first user message's date/time and selected model, then reuses those fixed values after model switches and resume |
-| `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> IndentFlexible -> LineTrimmed -> WhitespaceNorm -> EscapeNorm -> PartialLineIndent -> BlockAnchor), plus a matching-aware renderer that avoids the built-in exact preview |
-| `read.ts` | **Overrides built-in `read`** while preserving its native behavior; images are automatically routed to the current model or a configured fallback vision model |
+| `edit.ts` | **Overrides built-in `edit`** with compact, version-tagged hashline patches; one call can atomically apply multiple line-anchored `SWAP`, `CUT`, and `INS` hunks |
+| `read.ts` | **Overrides built-in `read`** with numbered hashline text snapshots; images are automatically routed to the current model or a configured fallback vision model |
 | `subagent.ts` | `subagent` - delegates independent investigation, implementation, and review to an isolated tool-using peer or a configured higher-capability advisor |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
@@ -31,7 +31,7 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 | `bun` | `bun` on PATH |
 | `rg` | `rg` on PATH |
 | `session-info` | None |
-| `edit` | None (no extra runtime deps; reuses pi's `diff` package) |
+| `edit` | None (no extra runtime deps; reuses pi's diff helpers) |
 | `read` | A `vision` model configured in `~/.pi/agent/settings.json` for use when the current model cannot consume images |
 | `subagent` | None; optionally configure peer and advisor models under `subagent` in `~/.pi/agent/settings.json` |
 | `codegraph` | `codegraph` CLI on PATH; a project must be indexed (`codegraph init`) for queries to work |
@@ -57,13 +57,40 @@ that model must declare `"image"` in its supported inputs. The overridden
 `~/.pi/agent/models.json`, `~/.pi/agent/auth.json`, OAuth, and provider
 environment variables. The extension does not store a separate API key.
 
-For text files, and for images when the current model already supports image
-input, `read` delegates to pi's native implementation. Otherwise it sends the
-native reader's processed image to the configured fallback model and returns
-the description. Trusted project settings may override either value with a
-`vision` object in `.pi/settings.json`. Settings are read on every fallback
-call, so changing the selected model does not require `/reload`. Changes to
-pi's model or provider configuration may still require `/reload`.
+For text files, `read` preserves pi's native access checks and limits, then
+returns an eight-hex whole-file tag and numbered source rows:
+
+```text
+[src/example.ts#7A31C9E2]
+1:export const value = 1;
+2:console.log(value);
+```
+
+The `edit` tool consumes that header and the original line numbers. A single
+call may contain several non-overlapping hunks:
+
+```text
+[src/example.ts#7A31C9E2]
+SWAP 1:
++export const value = 2;
+INS.POST 2:
++export { value };
+```
+
+`SWAP N:` or `SWAP N.=M:` replaces inclusive lines, `CUT N` or
+`CUT N.=M` deletes them, and `INS.PRE N:`, `INS.POST N:`, `INS.HEAD:`, or
+`INS.TAIL:` inserts literal `+TEXT` rows. All hunks use the same pre-edit
+coordinates and are validated before one write. A stale tag, invalid range,
+overlap, or no-op rejects the entire call. Re-read after a successful edit
+before issuing another patch.
+
+For images when the current model already supports image input, `read` keeps
+pi's native result. Otherwise it sends the native reader's processed image to
+the configured fallback model and returns the description. Trusted project
+settings may override either vision value with a `vision` object in
+`.pi/settings.json`. Settings are read on every fallback call, so changing the
+selected model does not require `/reload`. Changes to pi's model or provider
+configuration may still require `/reload`.
 
 For targeted image analysis, `read` also accepts an optional `image` object:
 

@@ -2,299 +2,309 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import registerEdit, { findMatch } from "../extensions/edit.ts";
+import registerEdit, {
+	applyHashlinePatch,
+	computeHashlineTag,
+	parseHashlinePatch,
+} from "../extensions/edit.ts";
 
-describe("deterministic matching", () => {
-	test("prefers an exact unique match", () => {
-		const content = ["before", "target();", "after"].join("\n");
-		const match = findMatch(content, "target();", "example.ts");
+function patch(body, path = "example.txt", tag = "A1B2C3D4") {
+	return `[${path}#${tag}]\n${body}`;
+}
 
-		expect(match.strategy).toBe("exact");
-		expect(content.slice(match.index, match.index + match.length)).toBe("target();");
+function registerDefinition() {
+	let definition;
+	registerEdit({
+		registerTool(tool) {
+			definition = tool;
+		},
 	});
+	return definition;
+}
 
-	test("rejects duplicate exact matches", () => {
-		const content = ["start", "alpha", "end", "---", "start", "alpha", "end"].join("\n");
-		const oldText = ["start", "alpha", "end"].join("\n");
-
-		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
-			"Found multiple matches for oldText",
+describe("hashline parser", () => {
+	test("parses every supported operation", () => {
+		const parsed = parseHashlinePatch(
+			patch(
+				[
+					"SWAP 2:",
+					"+two",
+					"SWAP 4.=5:",
+					"+four-five",
+					"CUT 7",
+					"CUT 9.=10",
+					"INS.PRE 12:",
+					"+before",
+					"INS.POST 13:",
+					"+after",
+					"INS.HEAD:",
+					"+head",
+					"INS.TAIL:",
+					"+tail",
+				].join("\n"),
+			),
 		);
+
+		expect(parsed.path).toBe("example.txt");
+		expect(parsed.tag).toBe("A1B2C3D4");
+		expect(parsed.hunks.map((hunk) => hunk.kind)).toEqual([
+			"swap",
+			"swap",
+			"cut",
+			"cut",
+			"insert",
+			"insert",
+			"insert",
+			"insert",
+		]);
+		expect(parsed.hunks[0]).toMatchObject({ start: 2, end: 2, body: ["two"] });
+		expect(parsed.hunks[1]).toMatchObject({ start: 4, end: 5, body: ["four-five"] });
 	});
 
-	test("uses relative indentation to disambiguate line-trimmed candidates", () => {
-		const content = [
-			"  if (ready) {",
-			"    run();",
-			"  }",
-			"",
-			"  if (ready) {",
-			"  run();",
-			"  }",
-		].join("\n");
-		const oldText = ["if (ready) {", "  run();", "}"].join("\n");
-		const match = findMatch(content, oldText, "example.ts");
+	test("preserves indentation and literal leading punctuation in body rows", () => {
+		const parsed = parseHashlinePatch(
+			patch(["SWAP 1:", "+\tindented", "+- bullet", "++plus", "+"].join("\n")),
+		);
 
-		expect(match.strategy).toBe("indentation-flexible");
-		expect(match.index).toBe(0);
+		expect(parsed.hunks[0].body).toEqual(["\tindented", "- bullet", "+plus", ""]);
 	});
 
-	test("unescapes a small set of oldText escapes", () => {
-		const content = ["alpha", "\tbeta"].join("\n");
-		const match = findMatch(content, "alpha\\n\\tbeta", "example.ts");
+	test("accepts lowercase hex in a copied header and canonicalizes it", () => {
+		expect(parseHashlinePatch(patch("CUT 1", "x", "abcdef12")).tag).toBe("ABCDEF12");
+	});
 
-		expect(match.strategy).toBe("escape-normalized");
-		expect(match.length).toBe(content.length);
+	test("rejects a missing header", () => {
+		expect(() => parseHashlinePatch("SWAP 1:\n+x")).toThrow("must begin");
+	});
+
+	test("rejects a second file section", () => {
+		expect(() =>
+			parseHashlinePatch(`${patch("CUT 1")}\n[other.txt#11223344]\nCUT 1`),
+		).toThrow("only one file section");
+	});
+
+	test("rejects payload without a hunk", () => {
+		expect(() => parseHashlinePatch(patch("+orphan"))).toThrow("no preceding");
+	});
+
+	test("rejects empty SWAP and insertion bodies", () => {
+		expect(() => parseHashlinePatch(patch("SWAP 1:"))).toThrow("needs at least one");
+		expect(() => parseHashlinePatch(patch("INS.HEAD:"))).toThrow("needs at least one");
+	});
+
+	test("rejects body rows under CUT", () => {
+		expect(() => parseHashlinePatch(patch("CUT 1\n+wrong"))).toThrow("CUT takes no body");
+	});
+
+	test("rejects descending ranges", () => {
+		expect(() => parseHashlinePatch(patch("CUT 5.=2"))).toThrow("ends before");
+	});
+
+	test("rejects non-canonical or unknown hunk headers", () => {
+		expect(() => parseHashlinePatch(patch("SWAP 1-2:\n+x"))).toThrow("invalid hunk");
+		expect(() => parseHashlinePatch(patch("@@ -1 +1 @@\n+x"))).toThrow("invalid hunk");
 	});
 });
 
-describe("partial-line indentation matching", () => {
-	const firstLine =
-		'\t\t\t\t"For searching, prefer rg and locate commands with `(Get-Command name).Source` (not `which`).",';
-	const insertedLine =
-		'\t\t\t\t"When using Select-String, count MatchInfo objects rather than Matches.",';
-	const followingLine = '\t\t\t\t"Pass multiline arguments with a here-string.",';
-	const content = [firstLine, insertedLine, followingLine].join("\n");
+describe("hashline application", () => {
+	test("applies multiple hunks against original line numbers", () => {
+		const parsed = parseHashlinePatch(
+			patch(["SWAP 2:", "+B", "CUT 3", "INS.POST 4:", "+after-d"].join("\n")),
+		);
 
-	test("matches a multiline fragment despite different leading indentation", () => {
-		const oldText = [
-			'(not `which`).",',
-			'\t\t\t"When using Select-String, count MatchInfo objects rather than Matches.",',
-		].join("\n");
-
-		const match = findMatch(content, oldText, "example.ts");
-		const matchedText = content.slice(match.index, match.index + match.length);
-
-		expect(match.strategy).toBe("partial-line-indentation");
-		expect(match.index).toBe(content.indexOf('(not `which`).",'));
-		expect(matchedText).toBe(
-			[
-				'(not `which`).",',
-				'\t\t\t\t"When using Select-String, count MatchInfo objects rather than Matches.",',
-			].join("\n"),
+		expect(applyHashlinePatch("a\nb\nc\nd\ne\n", parsed.hunks)).toBe(
+			"a\nB\nd\nafter-d\ne\n",
 		);
 	});
 
-	test("preserves text before the fragment and after the matched span", () => {
-		const oldText = [
-			'(not `which`).",',
-			'\t\t\t"When using Select-String, count MatchInfo objects rather than Matches.",',
-		].join("\n");
-		const match = findMatch(content, oldText, "example.ts");
-		const updated =
-			content.slice(0, match.index) + '(not `which`).",' + content.slice(match.index + match.length);
+	test("does not shift later anchors when an earlier replacement changes length", () => {
+		const parsed = parseHashlinePatch(
+			patch(["SWAP 1:", "+one-a", "+one-b", "SWAP 4:", "+FOUR"].join("\n")),
+		);
 
-		expect(updated).toContain("locate commands with `(Get-Command name).Source` (not `which`).\",");
-		expect(updated).toContain(followingLine);
-		expect(updated).not.toContain("When using Select-String");
-	});
-
-	test("does not consume indentation after a trailing newline", () => {
-		const oldText = ['(not `which`).",', "   "].join("\n");
-		const match = findMatch(content, oldText, "example.ts");
-		const matchedText = content.slice(match.index, match.index + match.length);
-
-		expect(matchedText).toBe('(not `which`).",\n');
-		expect(content.slice(match.index + match.length)).toStartWith("\t\t\t\t");
-	});
-
-	test("preserves a suffix after a last-line fragment", () => {
-		const suffixContent = ["\t\talpha();", "\t\tbeta(); // keep this suffix"].join("\n");
-		const oldText = ["  alpha();", "  beta();"].join("\n");
-		const match = findMatch(suffixContent, oldText, "example.ts");
-		const matchedText = suffixContent.slice(match.index, match.index + match.length);
-
-		expect(match.strategy).toBe("partial-line-indentation");
-		expect(matchedText).toBe(["alpha();", "\t\tbeta();"].join("\n"));
-		expect(suffixContent.slice(match.index + match.length)).toBe(" // keep this suffix");
-	});
-
-	test("rejects multiple normalized candidates even when their indentation differs", () => {
-		const duplicate = [
-			content,
-			"",
-			firstLine,
-			insertedLine.replace(/^\t+/, "  "),
-			followingLine,
-		].join("\n");
-		const oldText = [
-			'(not `which`).",',
-			'\t\t\t"When using Select-String, count MatchInfo objects rather than Matches.",',
-		].join("\n");
-
-		expect(() => findMatch(duplicate, oldText, "example.ts")).toThrow(
-			"Found multiple matches for oldText",
+		expect(applyHashlinePatch("one\ntwo\nthree\nfour\n", parsed.hunks)).toBe(
+			"one-a\none-b\ntwo\nthree\nFOUR\n",
 		);
 	});
 
-	test("adds a focused hint when a fragment still cannot be matched", () => {
-		const oldText = ['(not `which`).",', '"A different second line.",'].join("\n");
-
-		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
-			"The first line of oldText appears to be a line fragment",
+	test("supports head and tail insertion", () => {
+		const parsed = parseHashlinePatch(
+			patch(["INS.HEAD:", "+head", "INS.TAIL:", "+tail"].join("\n")),
 		);
-	});
-});
 
-describe("block-anchor matching", () => {
-	test("selects a clearly better fuzzy candidate", () => {
-		const content = [
-			"start",
-			"const value = alphaX;",
-			"end",
-			"---",
-			"start",
-			"completely different",
-			"end",
-		].join("\n");
-		const oldText = ["start", "const value = alphaY;", "end"].join("\n");
-		const match = findMatch(content, oldText, "example.ts");
-
-		expect(match.strategy).toBe("block-anchor");
-		expect(match.index).toBe(0);
+		expect(applyHashlinePatch("middle\n", parsed.hunks)).toBe("head\nmiddle\ntail\n");
 	});
 
-	test("rejects tied fuzzy candidates instead of choosing the first", () => {
-		const content = [
-			"start",
-			"const value = alphaX;",
-			"end",
-			"---",
-			"start",
-			"const value = alphaZ;",
-			"end",
-		].join("\n");
-		const oldText = ["start", "const value = alphaY;", "end"].join("\n");
+	test("can initialize an empty file with an edge insertion", () => {
+		const parsed = parseHashlinePatch(patch("INS.HEAD:\n+first"));
+		expect(applyHashlinePatch("", parsed.hunks)).toBe("first");
+	});
 
-		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
-			"Found multiple matches for oldText",
+	test("can delete the entire file without leaving a phantom newline", () => {
+		const parsed = parseHashlinePatch(patch("CUT 1.=2"));
+		expect(applyHashlinePatch("a\nb\n", parsed.hunks)).toBe("");
+	});
+
+	test("preserves the original final-newline state", () => {
+		const parsed = parseHashlinePatch(patch("SWAP 1:\n+A"));
+		expect(applyHashlinePatch("a\nb\n", parsed.hunks)).toBe("A\nb\n");
+		expect(applyHashlinePatch("a\nb", parsed.hunks)).toBe("A\nb");
+	});
+
+	test("rejects out-of-range anchors", () => {
+		const parsed = parseHashlinePatch(patch("SWAP 3:\n+x"));
+		expect(() => applyHashlinePatch("a\nb\n", parsed.hunks)).toThrow(
+			"line 3 does not exist",
 		);
 	});
 
-	test("penalizes a missing middle line", () => {
-		const content = ["start", "alpha", "beta", "end"].join("\n");
-		const oldText = ["start", "alpha", "beta", "gamma", "end"].join("\n");
-
-		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
-			"Could not find oldText",
+	test("rejects overlapping ranges", () => {
+		const parsed = parseHashlinePatch(
+			patch(["SWAP 2.=4:", "+x", "CUT 4.=5"].join("\n")),
+		);
+		expect(() => applyHashlinePatch("1\n2\n3\n4\n5\n", parsed.hunks)).toThrow(
+			"overlap",
 		);
 	});
 
-	test("penalizes an inserted middle line", () => {
-		const content = ["start", "alpha", "beta", "gamma", "end"].join("\n");
-		const oldText = ["start", "alpha", "beta", "end"].join("\n");
-
-		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
-			"Could not find oldText",
+	test("rejects duplicate insertion points", () => {
+		const parsed = parseHashlinePatch(
+			patch(["INS.POST 1:", "+x", "INS.PRE 2:", "+y"].join("\n")),
+		);
+		expect(() => applyHashlinePatch("1\n2\n", parsed.hunks)).toThrow(
+			"same insertion point",
 		);
 	});
 
-	test("continues past an early out-of-window tail anchor", () => {
-		const content = ["start", "alpha", "end", "beta", "end"].join("\n");
-		const oldText = ["start", "alpha", "ends", "beta", "end"].join("\n");
-		const match = findMatch(content, oldText, "example.ts");
-
-		expect(match.strategy).toBe("block-anchor");
-		expect(match.length).toBe(content.length);
-	});
-
-	test("does not fuzzy-match blocks with empty anchors", () => {
-		const content = ["", "alphaX", "end"].join("\n");
-		const oldText = ["", "alphaY", "end"].join("\n");
-
-		expect(() => findMatch(content, oldText, "example.ts")).toThrow(
-			"Could not find oldText",
+	test("rejects insertion inside a replaced range", () => {
+		const parsed = parseHashlinePatch(
+			patch(["SWAP 2.=4:", "+x", "INS.POST 2:", "+y"].join("\n")),
+		);
+		expect(() => applyHashlinePatch("1\n2\n3\n4\n5\n", parsed.hunks)).toThrow(
+			"overlap",
 		);
 	});
 });
 
-describe("edit rendering", () => {
-	test("exposes exactly one targeted replacement per call", () => {
-		let definition;
-		registerEdit({
-			registerTool(tool) {
-				definition = tool;
-			},
-		});
+describe("hashline tags", () => {
+	test("normalizes BOM and line endings", () => {
+		expect(computeHashlineTag("\uFEFFa\r\nb\r\n")).toBe(computeHashlineTag("a\nb\n"));
+	});
 
-		expect(Object.keys(definition.parameters.properties)).toEqual(["path", "oldText", "newText"]);
-		expect(definition.promptGuidelines.join("\n")).toContain(
-			"Each edit call performs exactly one oldText to newText replacement.",
-		);
+	test("changes when file content changes", () => {
+		expect(computeHashlineTag("a\n")).not.toBe(computeHashlineTag("b\n"));
+	});
+});
+
+describe("edit registration and execution", () => {
+	test("exposes only the compact input schema and sequential execution", () => {
+		const definition = registerDefinition();
+		expect(Object.keys(definition.parameters.properties)).toEqual(["input"]);
 		expect(definition.executionMode).toBe("sequential");
+		expect(definition.promptGuidelines.join("\n")).toContain(
+			"Put all non-overlapping changes for one file in one edit call",
+		);
 	});
 
-	test("uses extension-owned renderers instead of the built-in exact preview", () => {
-		let definition;
-		registerEdit({
-			registerTool(tool) {
-				definition = tool;
-			},
-		});
-
+	test("uses extension-owned renderers", () => {
+		const definition = registerDefinition();
 		expect(definition.renderShell).toBe("default");
 		expect(definition.renderCall).toBeFunction();
 		expect(definition.renderResult).toBeFunction();
 	});
 
-	test("renders one final error inside the shared tool shell", () => {
-		let definition;
-		registerEdit({
-			registerTool(tool) {
-				definition = tool;
-			},
-		});
-		const theme = {
-			bold: (text) => text,
-			fg: (_color, text) => text,
-		};
-		const context = {
-			isError: true,
-		};
-		const component = definition.renderResult(
-			{ content: [{ type: "text", text: "Could not find oldText." }], details: {} },
-			{ expanded: false, isPartial: false },
-			theme,
-			context,
-		);
-		const rendered = component.render(120).join("\n");
-
-		expect(rendered.match(/Could not find oldText\./g)).toHaveLength(1);
-	});
-});
-
-describe("edit execution", () => {
-	test("preserves BOM and CRLF and does not inspect cancellation after commit", async () => {
-		let definition;
-		registerEdit({
-			registerTool(tool) {
-				definition = tool;
-			},
-		});
-
-		const directory = await mkdtemp(join(tmpdir(), "pi-edit-test-"));
+	test("preserves BOM and CRLF while applying a multi-hunk patch", async () => {
+		const definition = registerDefinition();
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-edit-"));
 		const path = join(directory, "example.txt");
-		await writeFile(path, "\uFEFFalpha\r\nbeta\r\n", "utf8");
-		let abortChecks = 0;
-		const signal = {
-			get aborted() {
-				abortChecks++;
-				return abortChecks > 5;
-			},
-		};
+		const original = "\uFEFFalpha\r\nbeta\r\ngamma\r\n";
+		await writeFile(path, original, "utf8");
+		const tag = computeHashlineTag(original);
 
 		try {
-			await definition.execute(
+			const result = await definition.execute(
 				"tool-call",
-				{ path, oldText: "alpha\nbeta", newText: "alpha\ngamma" },
-				signal,
+				{
+					input: `[${path}#${tag}]\nSWAP 2:\n+BETA\nINS.POST 3:\n+delta`,
+				},
+				undefined,
 				undefined,
 				{ cwd: directory },
 			);
-			const updated = await readFile(path, "utf8");
+			expect(await readFile(path, "utf8")).toBe(
+				"\uFEFFalpha\r\nBETA\r\ngamma\r\ndelta\r\n",
+			);
+			expect(result.content[0].text).toContain("Applied 2 hashline hunks");
+			expect(result.content[0].text).toMatch(/#[0-9A-F]{8}\]/);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
 
-			expect(abortChecks).toBe(5);
-			expect(updated).toBe("\uFEFFalpha\r\ngamma\r\n");
+	test("rejects a stale tag without changing the file", async () => {
+		const definition = registerDefinition();
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-stale-"));
+		const path = join(directory, "example.txt");
+		await writeFile(path, "current\n", "utf8");
+
+		try {
+			await expect(
+				definition.execute(
+					"tool-call",
+					{ input: `[${path}#00000000]\nSWAP 1:\n+changed` },
+					undefined,
+					undefined,
+					{ cwd: directory },
+				),
+			).rejects.toThrow("Stale hashline tag");
+			expect(await readFile(path, "utf8")).toBe("current\n");
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("validates every hunk before writing any change", async () => {
+		const definition = registerDefinition();
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-atomic-"));
+		const path = join(directory, "example.txt");
+		const original = "one\ntwo\n";
+		await writeFile(path, original, "utf8");
+		const tag = computeHashlineTag(original);
+
+		try {
+			await expect(
+				definition.execute(
+					"tool-call",
+					{ input: `[${path}#${tag}]\nSWAP 1:\n+ONE\nSWAP 99:\n+bad` },
+					undefined,
+					undefined,
+					{ cwd: directory },
+				),
+			).rejects.toThrow("line 99 does not exist");
+			expect(await readFile(path, "utf8")).toBe(original);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects a byte-identical no-op", async () => {
+		const definition = registerDefinition();
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-noop-"));
+		const path = join(directory, "example.txt");
+		const original = "same\n";
+		await writeFile(path, original, "utf8");
+		const tag = computeHashlineTag(original);
+
+		try {
+			await expect(
+				definition.execute(
+					"tool-call",
+					{ input: `[${path}#${tag}]\nSWAP 1:\n+same` },
+					undefined,
+					undefined,
+					{ cwd: directory },
+				),
+			).rejects.toThrow("produced no change");
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

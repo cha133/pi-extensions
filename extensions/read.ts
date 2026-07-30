@@ -6,9 +6,16 @@
  * image that the current model cannot consume, this wrapper sends that already
  * processed image to the vision model selected by the `vision` object in
  * ~/.pi/agent/settings.json and returns the description as the read result.
+ *
+ * Text results are reformatted as hashline snapshots: an eight-hex whole-file
+ * tag followed by 1-indexed `LINE:TEXT` rows. The edit extension consumes those
+ * anchors so models can address several changes without reproducing old text.
  */
 
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { complete, type ImageContent, type UserMessage } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import {
@@ -16,6 +23,7 @@ import {
 	CONFIG_DIR_NAME,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
+	formatSize,
 	getAgentDir,
 	SettingsManager,
 	truncateHead,
@@ -61,7 +69,115 @@ interface ModelWithInputs {
 }
 
 interface NativeReadLikeResult {
-	content: Array<{ type: string }>;
+	content: Array<{ type: string; text?: string }>;
+}
+
+interface HashlineReadOptions {
+	path: string;
+	offset?: number;
+	limit?: number;
+}
+
+function normalizeToLF(text: string): string {
+	return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function stripBom(text: string): string {
+	return text.startsWith("\uFEFF") ? text.slice(1) : text;
+}
+
+function resolveLocalPath(path: string, cwd: string): string {
+	if (path === "~") return homedir();
+	if (path.startsWith("~/") || path.startsWith("~\\")) {
+		return join(homedir(), path.slice(2));
+	}
+	return resolve(cwd, path);
+}
+
+/** Must stay byte-for-byte compatible with edit.ts's optimistic-concurrency tag. */
+export function computeHashlineTag(text: string): string {
+	return createHash("sha256")
+		.update(normalizeToLF(stripBom(text)), "utf8")
+		.digest("hex")
+		.slice(0, 8)
+		.toUpperCase();
+}
+
+function splitFileLines(content: string): string[] {
+	if (content === "") return [];
+	const lines = content.split("\n");
+	if (content.endsWith("\n")) lines.pop();
+	return lines;
+}
+
+/**
+ * Format a complete text snapshot into the bounded, model-facing hashline shape.
+ * Prefix bytes count toward the cap and source lines are never partially emitted.
+ */
+export function formatHashlineRead(
+	rawContent: string,
+	options: HashlineReadOptions,
+): string {
+	const content = normalizeToLF(stripBom(rawContent));
+	const allLines = splitFileLines(content);
+	const startLine = Math.max(1, Math.floor(options.offset ?? 1));
+	const startIndex = startLine - 1;
+	const requestedLimit =
+		options.limit === undefined
+			? allLines.length - startIndex
+			: Math.max(0, Math.floor(options.limit));
+	const endIndex = Math.min(allLines.length, startIndex + requestedLimit);
+	const header = `[${options.path}#${computeHashlineTag(content)}]`;
+
+	if (allLines.length === 0) {
+		return `${header}\n[File is empty. Use INS.HEAD or INS.TAIL to add content.]`;
+	}
+
+	const output = [header];
+	let outputBytes = Buffer.byteLength(header, "utf8");
+	let displayed = 0;
+	for (
+		let index = startIndex;
+		index < endIndex && displayed < DEFAULT_MAX_LINES;
+		index++
+	) {
+		const row = `${index + 1}:${allLines[index]}`;
+		const rowBytes = Buffer.byteLength(row, "utf8") + 1;
+		if (outputBytes + rowBytes > DEFAULT_MAX_BYTES) break;
+		output.push(row);
+		outputBytes += rowBytes;
+		displayed++;
+	}
+
+	if (displayed === 0) {
+		const lineBytes = Buffer.byteLength(allLines[startIndex] ?? "", "utf8");
+		output.push(
+			`[Line ${startLine} is ${formatSize(lineBytes)}, too large to emit as a complete editable hashline row.]`,
+		);
+		return output.join("\n");
+	}
+
+	const nextIndex = startIndex + displayed;
+	if (nextIndex < endIndex) {
+		output.push(
+			`[Showing lines ${startLine}-${nextIndex} of ${allLines.length}. Use offset=${nextIndex + 1} to continue.]`,
+		);
+	} else if (endIndex < allLines.length) {
+		output.push(
+			`[${allLines.length - endIndex} more lines in file. Use offset=${endIndex + 1} to continue.]`,
+		);
+	}
+	return output.join("\n");
+}
+
+function isNativeImageResult(result: NativeReadLikeResult): boolean {
+	if (result.content.some((part) => part.type === "image")) return true;
+	return result.content.some(
+		(part) =>
+			part.type === "text" &&
+			typeof part.text === "string" &&
+			part.text.startsWith("Read image file ["),
+	);
 }
 
 function settingsPath(): string {
@@ -276,10 +392,12 @@ export default function (pi: ExtensionAPI) {
 					"or to the configured fallback vision model. Put image questions, instructions, and areas to " +
 					"focus in image.query; use image.detail to select the response depth.",
 			),
-			promptSnippet: "Read text files and inspect images with automatic vision fallback",
+			promptSnippet:
+				"Read numbered, version-tagged text snapshots and inspect images with automatic vision fallback",
 			promptGuidelines: [
 				...(nativeRead.promptGuidelines ?? []),
 				"Use read for both text files and local images.",
+				"Text reads begin with [PATH#TAG] and show LINE:TEXT rows. Copy that header and the original line numbers into edit.",
 				"When the user asks a specific question about an image, pass it in image.query.",
 				"Include any area to prioritize in image.query, and use image.detail when response depth matters.",
 				"Do not look for or call a separate image-viewing tool; read automatically routes images to a capable model.",
@@ -287,15 +405,32 @@ export default function (pi: ExtensionAPI) {
 			async execute(toolCallId, params, signal, onUpdate, toolCtx) {
 				const { image: imageOptions, ...nativeParams } = params;
 				const result = await nativeExecute(toolCallId, nativeParams, signal, onUpdate, toolCtx);
-				if (!needsVisionFallback(result, toolCtx.model)) {
+				if (needsVisionFallback(result, toolCtx.model)) {
+					const image = findImage(result);
+					if (!image) {
+						return result;
+					}
+					return describeImage(image, imageOptions, signal, toolCtx);
+				}
+				if (isNativeImageResult(result)) {
 					return result;
 				}
 
-				const image = findImage(result);
-				if (!image) {
-					return result;
-				}
-				return describeImage(image, imageOptions, signal, toolCtx);
+				const textPath = nativeParams.path;
+				const rawContent = await readFile(resolveLocalPath(textPath, toolCtx.cwd), "utf8");
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: formatHashlineRead(rawContent, {
+								path: textPath,
+								offset: nativeParams.offset,
+								limit: nativeParams.limit,
+							}),
+						},
+					],
+					details: result.details,
+				};
 			},
 		});
 	});

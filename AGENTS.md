@@ -13,8 +13,8 @@ extensions/        # one extension per .ts file, default-exported factory (pi: E
   bash.ts          # overrides built-in `bash` -> runs PowerShell 7 (pwsh.exe)
   shell-guidance.ts # guides ripgrep discovery/search and temp Bun scripts for complex logic
   session-info.ts  # persists and injects fixed first-message time + first-turn model
-  edit.ts          # overrides built-in `edit` -> multi-strategy fuzzy matching
-  read.ts          # overrides built-in `read` -> native behavior + automatic vision fallback
+  edit.ts          # overrides built-in `edit` -> versioned line-anchored hashline patches
+  read.ts          # overrides built-in `read` -> hashline text snapshots + automatic vision fallback
   subagent.ts      # isolated tool-using investigation, implementation, review, or advice
   codegraph.ts     # bridges codegraph's codegraph_explore MCP tool into a native pi tool
   web-search.ts    # web_search + web_fetch via Exa public MCP (no API key)
@@ -29,8 +29,8 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
 | _(none)_ | shell-guidance.ts | Adds system-prompt guidance via `before_agent_start`: use ripgrep for discovery/search, and move non-trivial shell logic into a temporary TypeScript/JavaScript file under `$env:TEMP` run with Bun. |
 | _(none)_ | session-info.ts | Captures the first user message's date/time and selected model in one custom session entry, then appends the same fixed values to the system prompt on every turn and resume. |
-| `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → IndentFlexible → LineTrimmed → WhitespaceNorm → EscapeNorm → PartialLineIndent → BlockAnchor). Owns its renderer so pi does not run the built-in exact-match preview against fuzzy arguments. Separate calls run sequentially; preserves BOM + EOL. |
-| `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition` so native text/image handling and rendering remain intact. When the current model cannot consume the native image result, routes it through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis without modifying native multimodal results. |
+| `edit` | edit.ts | **Overrides built-in.** Accepts one `input` string containing one `[PATH#8HEXTAG]` section and multiple line-anchored `SWAP`, `CUT`, or `INS` hunks. Every hunk uses the original pre-edit line numbers; the complete batch is parsed and validated before one write. Rejects stale tags, invalid/overlapping ranges, and no-ops; preserves BOM + EOL. |
+| `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition`; text results become `[PATH#8HEXTAG]` plus `LINE:TEXT` rows consumed by `edit`. Native image handling remains intact, and models without image input route through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis. |
 | `subagent` | subagent.ts | Runs an isolated in-memory pi agent session with focused read, shell, edit, codegraph, and web tools. Defaults to a peer model (the current model unless configured); dynamically exposes an `advisor` tier only when a separately configured different model is available. Delegated tasks state whether edits are authorized. Each call renders as a compact two-line task/status box and exports its full transcript to `%TEMP%\pi-subagent-<session-id>.jsonl`. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
