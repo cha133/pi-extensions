@@ -124,10 +124,16 @@ that same model as the main model hides the option again. This keeps normal
 delegation cheap and prevents a nominal advisor call from silently becoming
 another same-model review.
 
-Only the subagent's final report is returned to the main model. It inherits the
-current pi thinking level. Reports larger than 2,000 lines or 50 KB are
+Only the subagent's final report is returned inline to the main model. It
+inherits the current pi thinking level. Reports larger than 2,000 lines or 50 KB are
 truncated, and the full output is saved to a temporary file whose path is
 included in the result.
+
+Every invocation also exports the complete child session to
+`%TEMP%\pi-subagent-<session-id>.jsonl` before shutdown. The result includes
+that path so the parent agent or an external investigator can inspect exact
+assistant turns, tool calls, tool results, failures, and retries without placing
+the full transcript in the parent model's context by default.
 
 Each running subagent occupies one compact two-line tool box in the TUI. The
 first line shows its tier and task subject; the second shows its latest tool,

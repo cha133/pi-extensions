@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import registerSubagent, {
 	createSubagentTool,
 	createSubagentParameters,
@@ -191,6 +193,7 @@ describe("subagent SDK session", () => {
 		let listener;
 		let receivedOptions;
 		const session = {
+			sessionId: "child-success",
 			subscribe(value) {
 				listener = value;
 				return () => actions.push("unsubscribe");
@@ -213,6 +216,10 @@ describe("subagent SDK session", () => {
 			},
 			async abort() {
 				actions.push("abort");
+			},
+			exportToJsonl(path) {
+				actions.push(`export:${path}`);
+				return path;
 			},
 			extensionRunner: {
 				async emit(event) {
@@ -256,11 +263,14 @@ describe("subagent SDK session", () => {
 				cost: 0.02,
 				turns: 1,
 			},
+			transcriptPath: join(tmpdir(), "pi-subagent-child-success.jsonl"),
+			transcriptError: undefined,
 		});
 		expect(statuses).toContainEqual({ phase: "tool", summary: "read: src/auth.ts" });
 		expect(actions).toEqual([
 			"prompt:Review auth",
 			"unsubscribe",
+			`export:${join(tmpdir(), "pi-subagent-child-success.jsonl")}`,
 			"abort",
 			"session_shutdown:quit",
 			"dispose",
@@ -279,6 +289,7 @@ describe("subagent SDK session", () => {
 			releasePrompt = resolve;
 		});
 		const session = {
+			sessionId: "child-cancelled",
 			subscribe() {
 				return () => actions.push("unsubscribe");
 			},
@@ -290,6 +301,10 @@ describe("subagent SDK session", () => {
 			async abort() {
 				actions.push("abort");
 				releasePrompt();
+			},
+			exportToJsonl(path) {
+				actions.push("export");
+				return path;
 			},
 			extensionRunner: {
 				async emit() {
@@ -316,6 +331,7 @@ describe("subagent SDK session", () => {
 		const result = await running;
 
 		expect(result.stopReason).toBe("aborted");
+		expect(result.transcriptPath).toBe(join(tmpdir(), "pi-subagent-child-cancelled.jsonl"));
 		expect(actions.filter((action) => action === "abort")).toHaveLength(2);
 		expect(actions.slice(-3)).toEqual(["abort", "shutdown", "dispose"]);
 	});
@@ -323,6 +339,7 @@ describe("subagent SDK session", () => {
 	test("returns prompt failures after gracefully shutting down the session", async () => {
 		const actions = [];
 		const session = {
+			sessionId: "child-failed",
 			subscribe() {
 				return () => actions.push("unsubscribe");
 			},
@@ -331,6 +348,10 @@ describe("subagent SDK session", () => {
 			},
 			async abort() {
 				actions.push("abort");
+			},
+			exportToJsonl(path) {
+				actions.push("export");
+				return path;
 			},
 			extensionRunner: {
 				async emit() {
@@ -355,7 +376,8 @@ describe("subagent SDK session", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toBe("authentication expired");
-		expect(actions).toEqual(["unsubscribe", "abort", "shutdown", "dispose"]);
+		expect(result.transcriptPath).toBe(join(tmpdir(), "pi-subagent-child-failed.jsonl"));
+		expect(actions).toEqual(["unsubscribe", "export", "abort", "shutdown", "dispose"]);
 	});
 });
 

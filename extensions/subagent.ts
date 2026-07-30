@@ -6,8 +6,8 @@
  * A separately configured advisor tier is exposed only when it resolves to a
  * model different from the current one. Both tiers receive the same focused
  * coding tools, stream a compact activity status back to the parent, and return
- * only their final answer. Oversized answers are truncated with the full text
- * saved to a temporary file.
+ * their final answer plus a temporary JSONL transcript path. Oversized answers
+ * are truncated with the full text saved to a separate temporary file.
  */
 
 import { promises as fs } from "node:fs";
@@ -101,6 +101,8 @@ interface SubagentDetails {
 	truncated?: boolean;
 	totalLines?: number;
 	fullOutputPath?: string;
+	transcriptPath?: string;
+	transcriptError?: string;
 }
 
 interface RunResult {
@@ -108,6 +110,8 @@ interface RunResult {
 	stopReason?: string;
 	errorMessage?: string;
 	usage: UsageStats;
+	transcriptPath?: string;
+	transcriptError?: string;
 }
 
 interface ModelIdentity {
@@ -489,6 +493,11 @@ async function shutdownSubagentSession(session: AgentSession): Promise<void> {
 	}
 }
 
+function exportSubagentTranscript(session: AgentSession): string {
+	const transcriptPath = join(tmpdir(), `pi-subagent-${session.sessionId}.jsonl`);
+	return session.exportToJsonl(transcriptPath);
+}
+
 export async function runSubagent(
 	cwd: string,
 	model: Model<any>,
@@ -503,6 +512,8 @@ export async function runSubagent(
 	let finalOutput = "";
 	let stopReason: string | undefined;
 	let errorMessage: string | undefined;
+	let transcriptPath: string | undefined;
+	let transcriptError: string | undefined;
 	const progress = new SubagentProgressTracker();
 	let pendingStatus: SubagentStatus | undefined;
 	let statusTimer: ReturnType<typeof setTimeout> | undefined;
@@ -582,11 +593,16 @@ export async function runSubagent(
 		if (statusTimer) clearTimeout(statusTimer);
 		statusTimer = undefined;
 		flushStatus();
+		try {
+			transcriptPath = exportSubagentTranscript(session);
+		} catch (error: unknown) {
+			transcriptError = error instanceof Error ? error.message : String(error);
+		}
 		await shutdownSubagentSession(session);
 	}
 
 	if (signal?.aborted) stopReason = "aborted";
-	return { finalOutput, stopReason, errorMessage, usage };
+	return { finalOutput, stopReason, errorMessage, usage, transcriptPath, transcriptError };
 }
 
 async function truncateOutput(output: string): Promise<{
@@ -620,6 +636,12 @@ function failure(message: string) {
 		content: [{ type: "text" as const, text: `[Subagent failed: ${message}]` }],
 		details: undefined,
 	};
+}
+
+function transcriptFooter(result: Pick<RunResult, "transcriptPath" | "transcriptError">): string {
+	if (result.transcriptPath) return `\n\n[Full subagent transcript: ${result.transcriptPath}]`;
+	if (result.transcriptError) return `\n\n[Subagent transcript unavailable: ${result.transcriptError}]`;
+	return "";
 }
 
 function resolveAdvisorForSchema(ctx: ExtensionContext): boolean {
@@ -666,16 +688,17 @@ export function createSubagentTool(advisorAvailable: boolean) {
 			? "Delegate a focused investigation, implementation, or review to an isolated subagent with its own context and coding tools. " +
 				'Use the default peer tier for parallel exploration and cross-checking. Use tier "advisor" only for ' +
 				"difficult judgments or important plan and answer audits that warrant the configured higher-capability model. " +
-				"Returns the subagent's final report, truncated to 2,000 lines or 50 KB with overflow saved to a temporary file."
+				"Returns the subagent's final report and full JSONL transcript path; reports are truncated to 2,000 lines or 50 KB with overflow saved to a temporary file."
 			: "Delegate a focused investigation, implementation, or review to an isolated peer subagent with its own context and coding tools. " +
-				"Use it for parallel exploration, implementation, cross-checking, and independent review. Returns the subagent's final report, " +
-				"truncated to 2,000 lines or 50 KB with overflow saved to a temporary file.",
+				"Use it for parallel exploration, implementation, cross-checking, and independent review. Returns the subagent's final report " +
+				"and full JSONL transcript path; reports are truncated to 2,000 lines or 50 KB with overflow saved to a temporary file.",
 		promptSnippet: "Delegate independent investigation, implementation, or review to a tool-using subagent",
 		promptGuidelines: [
 			"Use subagent for a focused investigation, implementation, independent cross-check, or review that can proceed autonomously; keep routine work in the main agent.",
 			"Give the subagent a self-contained task with the objective, relevant context, constraints, expected deliverable, and an explicit statement of whether file modifications are authorized; do not copy the full conversation.",
 			"Use the default peer tier for normal parallel exploration and review. Use advisor only when it is available and the judgment or audit materially benefits from the configured higher-capability model.",
 			"Treat subagent output as evidence and advice rather than authority; reconcile it with primary evidence before answering or acting.",
+			"Use the returned JSONL transcript path when exact tool commands, raw tool results, or the subagent's reasoning must be audited.",
 		],
 		executionMode: "parallel" as const,
 		parameters: createSubagentParameters(advisorAvailable),
@@ -749,8 +772,17 @@ export function createSubagentTool(advisorAvailable: boolean) {
 				);
 				if (signal?.aborted || result.stopReason === "aborted") {
 					return {
-						content: [{ type: "text" as const, text: "[Subagent failed: cancelled]" }],
-						details: statusDetails({ phase: "cancelled", summary: "Cancelled" }),
+						content: [
+							{
+								type: "text" as const,
+								text: `[Subagent failed: cancelled]${transcriptFooter(result)}`,
+							},
+						],
+						details: {
+							...statusDetails({ phase: "cancelled", summary: "Cancelled" }),
+							transcriptPath: result.transcriptPath,
+							transcriptError: result.transcriptError,
+						},
 					};
 				}
 
@@ -775,15 +807,27 @@ export function createSubagentTool(advisorAvailable: boolean) {
 					truncated: output.truncated,
 					totalLines: output.totalLines,
 					fullOutputPath: output.fullOutputPath,
+					transcriptPath: result.transcriptPath,
+					transcriptError: result.transcriptError,
 				};
 
 				if (failed) {
 					return {
-						content: [{ type: "text" as const, text: `[Subagent failed]\n${output.content}` }],
+						content: [
+							{
+								type: "text" as const,
+								text: `[Subagent failed]\n${output.content}${transcriptFooter(result)}`,
+							},
+						],
 						details,
 					};
 				}
-				return { content: [{ type: "text" as const, text: output.content }], details };
+				return {
+					content: [
+						{ type: "text" as const, text: `${output.content}${transcriptFooter(result)}` },
+					],
+					details,
+				};
 			} catch (error: unknown) {
 				const message = error instanceof Error ? error.message : String(error);
 				return {
