@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
   "version": "1.0.0",
-  "description": "Personal pi coding-agent extensions: advisor reviews, stable session info, shell workflow guidance, web search, bash/edit/read overrides, codegraph bridge, and vision fallback",
+  "description": "Personal pi coding-agent extensions: tool-using subagents, stable session info, shell workflow guidance, web search, bash/edit/read overrides, codegraph bridge, and vision fallback",
   "type": "module",
   "license": "MIT",
   "repository": {

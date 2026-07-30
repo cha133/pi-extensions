@@ -15,7 +15,7 @@ extensions/        # one extension per .ts file, default-exported factory (pi: E
   session-info.ts  # persists and injects fixed first-message time + first-turn model
   edit.ts          # overrides built-in `edit` -> multi-strategy fuzzy matching
   read.ts          # overrides built-in `read` -> native behavior + automatic vision fallback
-  advisor.ts       # independent same-model review or configured higher-capability advice
+  subagent.ts      # isolated tool-using peer review or configured higher-capability advice
   codegraph.ts     # bridges codegraph's codegraph_explore MCP tool into a native pi tool
   web-search.ts    # web_search + web_fetch via Exa public MCP (no API key)
 package.json       # pi-package manifest + peerDeps (runtime) + devDeps (types/tsc only)
@@ -31,7 +31,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | _(none)_ | session-info.ts | Captures the first user message's date/time and selected model in one custom session entry, then appends the same fixed values to the system prompt on every turn and resume. |
 | `edit` | edit.ts | **Overrides built-in.** Single `oldText` → `newText` replacement per call, with multi-strategy fuzzy matching (Exact → IndentFlexible → LineTrimmed → WhitespaceNorm → EscapeNorm → PartialLineIndent → BlockAnchor). Owns its renderer so pi does not run the built-in exact-match preview against fuzzy arguments. Separate calls run sequentially; preserves BOM + EOL. |
 | `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition` so native text/image handling and rendering remain intact. When the current model cannot consume the native image result, routes it through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis without modifying native multimodal results. |
-| `advisor` | advisor.ts | Gives the main model an explicit, tool-free consultation call. Defaults to an independent second pass by the current model; an `advisor` object in settings may select a different model, which is treated as a user-chosen higher-capability advisor. |
+| `subagent` | subagent.ts | Runs an isolated pi CLI process with research tools. Defaults to a peer model (the current model unless configured); dynamically exposes an `advisor` tier only when a separately configured different model is available. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
 | `web_fetch` | web-search.ts | Same Exa MCP, fetches URL bodies. Call after `web_search`. |
