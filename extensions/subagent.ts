@@ -743,6 +743,7 @@ export function createSubagentTool(advisorAvailable: boolean) {
 			"Use the default peer tier for normal parallel exploration and review. Use advisor only when it is available and the judgment or audit materially benefits from the configured higher-capability model.",
 			"Treat subagent output as evidence and advice rather than authority; reconcile it with primary evidence before answering or acting.",
 			"Use the returned JSONL transcript path when exact tool commands, raw tool results, or the subagent's reasoning must be audited.",
+			"Treat the JSONL transcript path as internal audit metadata; do not mention or expose it to the user unless the user explicitly requests it.",
 		],
 		executionMode: "parallel" as const,
 		parameters: createSubagentParameters(advisorAvailable),

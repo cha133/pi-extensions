@@ -104,6 +104,13 @@ describe("subagent tools", () => {
 			"web_fetch",
 		]);
 	});
+
+	test("keeps transcript paths internal unless the user requests one", () => {
+		const guidelines = createSubagentTool(false).promptGuidelines.join("\n");
+		expect(guidelines).toContain(
+			"do not mention or expose it to the user unless the user explicitly requests it",
+		);
+	});
 });
 
 describe("subagent progress", () => {
