@@ -165,10 +165,10 @@ describe("subagent progress", () => {
 		expect(formatToolActivity("read", { path: "src/auth.ts" })).toBe("read: src/auth.ts");
 		expect(formatToolActivity("edit", { path: "src/auth.ts" })).toBe("edit: src/auth.ts");
 		expect(formatStatusLine({ phase: "tool", summary: "read: src/auth.ts" })).toBe(
-			"▸ read: src/auth.ts",
+			"read: src/auth.ts",
 		);
 		expect(formatStatusLine({ phase: "finished", summary: "Finished · 3 turns" })).toBe(
-			"✓ Finished · 3 turns",
+			"Finished · 3 turns",
 		);
 	});
 });
@@ -435,7 +435,7 @@ describe("subagent rendering", () => {
 		expect(call.render(40)).toHaveLength(1);
 		expect(plain(call.render(40)[0]).trimEnd()).toBe("subagent · advisor · Audit auth errors");
 		expect(result.render(40)).toHaveLength(1);
-		expect(plain(result.render(40)[0]).trimEnd()).toBe("▸ bash: rg -n authentication packages");
+		expect(plain(result.render(40)[0]).trimEnd()).toBe("bash: rg -n authentication packages");
 		expect(tool.executionMode).toBe("parallel");
 	});
 

@@ -390,19 +390,19 @@ export function formatToolActivity(toolName: string, rawArgs: unknown): string {
 export function formatStatusLine(status: SubagentStatus): string {
 	switch (status.phase) {
 		case "starting":
-			return `… ${status.summary}`;
+			return status.summary;
 		case "tool":
-			return `▸ ${status.summary}`;
+			return status.summary;
 		case "reasoning":
-			return `◌ Reasoning: ${status.summary}`;
+			return `Reasoning: ${status.summary}`;
 		case "replying":
-			return `◌ Replying: ${status.summary}`;
+			return `Replying: ${status.summary}`;
 		case "finished":
-			return `✓ ${status.summary}`;
+			return status.summary;
 		case "failed":
-			return `✗ ${status.summary}`;
+			return status.summary;
 		case "cancelled":
-			return `■ ${status.summary}`;
+			return status.summary;
 	}
 }
 
