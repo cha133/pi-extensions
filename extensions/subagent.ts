@@ -4,9 +4,9 @@
  * The peer tier uses the configured peer model or inherits the current model.
  * A separately configured advisor tier is exposed only when it resolves to a
  * model different from the current one. Both tiers receive the same research
- * tools, stream completed turns back to the parent, and return only their final
- * answer. Oversized answers are truncated with the full text saved to a
- * temporary file.
+ * tools, stream a compact activity status back to the parent, and return only
+ * their final answer. Oversized answers are truncated with the full text saved
+ * to a temporary file.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai/compat";
+import { TruncatedText } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	CONFIG_DIR_NAME,
@@ -75,15 +76,30 @@ interface UsageStats {
 	turns: number;
 }
 
+export type SubagentPhase =
+	| "starting"
+	| "tool"
+	| "reasoning"
+	| "replying"
+	| "finished"
+	| "failed"
+	| "cancelled";
+
+export interface SubagentStatus {
+	phase: SubagentPhase;
+	summary: string;
+}
+
 interface SubagentDetails {
 	tier: SubagentTier;
 	provider: string;
 	model: string;
-	exitCode: number;
+	status: SubagentStatus;
+	exitCode?: number;
 	stopReason?: string;
-	usage: UsageStats;
-	truncated: boolean;
-	totalLines: number;
+	usage?: UsageStats;
+	truncated?: boolean;
+	totalLines?: number;
 	fullOutputPath?: string;
 }
 
@@ -99,6 +115,32 @@ interface RunResult {
 interface ModelIdentity {
 	provider: string;
 	id: string;
+}
+
+interface JsonAssistantMessage {
+	role?: string;
+	content?: Array<{ type?: string; text?: string }>;
+	stopReason?: string;
+	errorMessage?: string;
+	usage?: {
+		input?: number;
+		output?: number;
+		cacheRead?: number;
+		cacheWrite?: number;
+		cost?: { total?: number };
+	};
+}
+
+export interface SubagentJsonEvent {
+	type?: string;
+	toolCallId?: string;
+	toolName?: string;
+	args?: unknown;
+	message?: JsonAssistantMessage;
+	assistantMessageEvent?: {
+		type?: string;
+		delta?: string;
+	};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -289,11 +331,140 @@ function appendBounded(current: string, chunk: string): string {
 	return Buffer.from(combined, "utf8").subarray(-DEFAULT_MAX_BYTES).toString("utf8");
 }
 
-function messageText(message: {
-	content?: Array<{ type?: string; text?: string }>;
-}): string {
+function compactLine(value: unknown, fallback = "..."): string {
+	if (typeof value !== "string") return fallback;
+	const line = value
+		.split(/\r?\n/, 1)[0]
+		.replace(/\s+/g, " ")
+		.trim();
+	return line || fallback;
+}
+
+function recentParagraphLine(value: string): string {
+	const paragraphs = value.trim().split(/\r?\n\s*\r?\n/);
+	return compactLine(paragraphs.at(-1));
+}
+
+export function taskSubject(task: string): string {
+	return compactLine(task, "Untitled task");
+}
+
+function argumentRecord(value: unknown): Record<string, unknown> {
+	return isRecord(value) ? value : {};
+}
+
+export function formatToolActivity(toolName: string, rawArgs: unknown): string {
+	const args = argumentRecord(rawArgs);
+	switch (toolName) {
+		case "bash":
+			return `bash: ${compactLine(args.command)}`;
+		case "read":
+			return `read: ${compactLine(args.path ?? args.file_path)}`;
+		case "grep":
+			return `grep: ${compactLine(args.pattern)}`;
+		case "find":
+			return `find: ${compactLine(args.pattern)}`;
+		case "ls":
+			return `ls: ${compactLine(args.path, ".")}`;
+		case "codegraph_explore":
+			return `codegraph: ${compactLine(args.query)}`;
+		case "web_search":
+			return `web search: ${compactLine(args.query)}`;
+		case "web_fetch": {
+			const urls = Array.isArray(args.urls) ? args.urls : [];
+			return `web fetch: ${compactLine(urls[0], `${urls.length} URLs`)}`;
+		}
+		default:
+			return `${toolName}: ${compactLine(JSON.stringify(args), "running")}`;
+	}
+}
+
+export function formatStatusLine(status: SubagentStatus): string {
+	switch (status.phase) {
+		case "starting":
+			return `… ${status.summary}`;
+		case "tool":
+			return `▸ ${status.summary}`;
+		case "reasoning":
+			return `◌ Reasoning: ${status.summary}`;
+		case "replying":
+			return `◌ Replying: ${status.summary}`;
+		case "finished":
+			return `✓ ${status.summary}`;
+		case "failed":
+			return `✗ ${status.summary}`;
+		case "cancelled":
+			return `■ ${status.summary}`;
+	}
+}
+
+/**
+ * Reduce pi's JSON event stream to one human-readable status line. Transcript
+ * content stays in the child process; only the latest activity is retained.
+ */
+export class SubagentProgressTracker {
+	private thinking = "";
+	private reply = "";
+	private activeTools = new Map<string, string>();
+	private status: SubagentStatus = { phase: "starting", summary: "Starting..." };
+
+	get current(): SubagentStatus {
+		return this.status;
+	}
+
+	handle(event: SubagentJsonEvent): SubagentStatus | undefined {
+		switch (event.type) {
+			case "message_start":
+				if (event.message?.role !== "assistant") return undefined;
+				this.thinking = "";
+				this.reply = "";
+				return this.set({ phase: "starting", summary: "Thinking..." });
+			case "tool_execution_start": {
+				const summary = formatToolActivity(event.toolName ?? "tool", event.args);
+				this.activeTools.set(event.toolCallId ?? `${this.activeTools.size}`, summary);
+				return this.set({ phase: "tool", summary });
+			}
+			case "tool_execution_end": {
+				if (event.toolCallId) this.activeTools.delete(event.toolCallId);
+				const remaining = Array.from(this.activeTools.values()).at(-1);
+				return this.set(
+					remaining
+						? { phase: "tool", summary: remaining }
+						: { phase: "starting", summary: "Continuing..." },
+				);
+			}
+			case "message_update": {
+				const update = event.assistantMessageEvent;
+				if (update?.type === "thinking_delta" && update.delta) {
+					this.thinking = appendBounded(this.thinking, update.delta);
+					return this.set({ phase: "reasoning", summary: recentParagraphLine(this.thinking) });
+				}
+				if (update?.type === "text_delta" && update.delta) {
+					this.reply = appendBounded(this.reply, update.delta);
+					return this.set({ phase: "replying", summary: recentParagraphLine(this.reply) });
+				}
+				return undefined;
+			}
+			case "message_end": {
+				if (event.message?.role !== "assistant") return undefined;
+				const text = messageText(event.message);
+				return text ? this.set({ phase: "replying", summary: recentParagraphLine(text) }) : undefined;
+			}
+			default:
+				return undefined;
+		}
+	}
+
+	private set(status: SubagentStatus): SubagentStatus | undefined {
+		if (status.phase === this.status.phase && status.summary === this.status.summary) return undefined;
+		this.status = status;
+		return status;
+	}
+}
+
+function messageText(message: JsonAssistantMessage | undefined): string {
 	return (
-		message.content
+		message?.content
 			?.filter((part): part is { type: string; text: string } => part.type === "text" && typeof part.text === "string")
 			.map((part) => part.text)
 			.join("\n")
@@ -320,7 +491,7 @@ async function runSubagent(
 	thinkingLevel: ExtensionContext["thinkingLevel"],
 	task: string,
 	signal: AbortSignal | undefined,
-	onText: ((text: string) => void) | undefined,
+	onStatus: ((status: SubagentStatus) => void) | undefined,
 ): Promise<RunResult> {
 	const args = [
 		"--mode",
@@ -343,6 +514,34 @@ async function runSubagent(
 	let stdoutBuffer = "";
 	let stopReason: string | undefined;
 	let errorMessage: string | undefined;
+	const progress = new SubagentProgressTracker();
+	let pendingStatus: SubagentStatus | undefined;
+	let statusTimer: ReturnType<typeof setTimeout> | undefined;
+	let lastStatusUpdate = 0;
+	const flushStatus = () => {
+		if (!pendingStatus || !onStatus) return;
+		onStatus(pendingStatus);
+		pendingStatus = undefined;
+		lastStatusUpdate = Date.now();
+	};
+	const publishStatus = (status: SubagentStatus, immediate = false) => {
+		if (!onStatus) return;
+		pendingStatus = status;
+		const elapsed = Date.now() - lastStatusUpdate;
+		if (immediate || elapsed >= 100) {
+			if (statusTimer) clearTimeout(statusTimer);
+			statusTimer = undefined;
+			flushStatus();
+			return;
+		}
+		if (!statusTimer) {
+			statusTimer = setTimeout(() => {
+				statusTimer = undefined;
+				flushStatus();
+			}, 100 - elapsed);
+		}
+	};
+	publishStatus(progress.current, true);
 
 	const exitCode = await new Promise<number>((resolve) => {
 		const proc = spawn(invocation.command, invocation.args, {
@@ -355,6 +554,9 @@ async function runSubagent(
 		const settle = (code: number) => {
 			if (settled) return;
 			settled = true;
+			if (statusTimer) clearTimeout(statusTimer);
+			statusTimer = undefined;
+			flushStatus();
 			signal?.removeEventListener("abort", abort);
 			resolve(code);
 		};
@@ -362,26 +564,18 @@ async function runSubagent(
 
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
-			let event: {
-				type?: string;
-				message?: {
-					role?: string;
-					content?: Array<{ type?: string; text?: string }>;
-					stopReason?: string;
-					errorMessage?: string;
-					usage?: {
-						input?: number;
-						output?: number;
-						cacheRead?: number;
-						cacheWrite?: number;
-						cost?: { total?: number };
-					};
-				};
-			};
+			let event: SubagentJsonEvent;
 			try {
-				event = JSON.parse(line) as typeof event;
+				event = JSON.parse(line) as SubagentJsonEvent;
 			} catch {
 				return;
+			}
+			const nextStatus = progress.handle(event);
+			if (nextStatus) {
+				publishStatus(
+					nextStatus,
+					event.type === "tool_execution_start" || event.type === "tool_execution_end",
+				);
 			}
 			const message = event.type === "message_end" ? event.message : undefined;
 			if (message?.role !== "assistant") return;
@@ -389,7 +583,6 @@ async function runSubagent(
 			const text = messageText(message);
 			if (text) {
 				finalOutput = text;
-				onText?.(text);
 			}
 			usage.turns++;
 			usage.input += message.usage?.input ?? 0;
@@ -472,7 +665,32 @@ function resolveAdvisorForSchema(ctx: ExtensionContext): boolean {
 	}
 }
 
-function createSubagentTool(advisorAvailable: boolean) {
+function formatCount(count: number): string {
+	if (count < 1_000) return String(count);
+	if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
+	return `${Math.round(count / 1_000)}k`;
+}
+
+function finishedStatus(model: Model<any>, usage: UsageStats): SubagentStatus {
+	const turns = `${usage.turns} turn${usage.turns === 1 ? "" : "s"}`;
+	const tokens = `↑${formatCount(usage.input)} ↓${formatCount(usage.output)}`;
+	return { phase: "finished", summary: `Finished · ${turns} · ${model.id} · ${tokens}` };
+}
+
+function fallbackResultStatus(
+	result: { content: Array<{ type: string; text?: string }> },
+	isError: boolean,
+	isPartial: boolean,
+): SubagentStatus {
+	const text = result.content.find((part) => part.type === "text")?.text;
+	if (isError || text?.startsWith("[Subagent failed")) {
+		return { phase: "failed", summary: compactLine(text, "Failed") };
+	}
+	if (isPartial) return { phase: "starting", summary: compactLine(text, "Running...") };
+	return { phase: "finished", summary: "Finished" };
+}
+
+export function createSubagentTool(advisorAvailable: boolean) {
 	return {
 		name: "subagent",
 		label: "Subagent",
@@ -491,7 +709,32 @@ function createSubagentTool(advisorAvailable: boolean) {
 			"Use the default peer tier for normal parallel exploration and review. Use advisor only when it is available and the judgment or audit materially benefits from the configured higher-capability model.",
 			"Treat subagent output as evidence and advice rather than authority; reconcile it with primary evidence before answering or acting.",
 		],
+		executionMode: "parallel" as const,
 		parameters: createSubagentParameters(advisorAvailable),
+		renderCall(args: { task: string; tier?: unknown }, theme: any) {
+			const tier = args.tier === "advisor" ? "advisor" : "peer";
+			const prefix = theme.fg("toolTitle", theme.bold(`${tier} · `));
+			return new TruncatedText(prefix + theme.fg("accent", taskSubject(args.task)));
+		},
+		renderResult(
+			result: { content: Array<{ type: string; text?: string }>; details?: unknown },
+			options: { expanded: boolean; isPartial: boolean },
+			theme: any,
+			context: { isError: boolean },
+		) {
+			const details = result.details as SubagentDetails | undefined;
+			const status =
+				details?.status ?? fallbackResultStatus(result, context.isError, options.isPartial);
+			const color =
+				status.phase === "failed"
+					? "error"
+					: status.phase === "finished"
+						? "success"
+						: status.phase === "cancelled"
+							? "warning"
+							: "muted";
+			return new TruncatedText(theme.fg(color, formatStatusLine(status)));
+		},
 		async execute(
 			_toolCallId: string,
 			params: { task: string; tier?: unknown },
@@ -515,6 +758,12 @@ function createSubagentTool(advisorAvailable: boolean) {
 			}
 
 			try {
+				const statusDetails = (status: SubagentStatus): SubagentDetails => ({
+					tier,
+					provider: model.provider,
+					model: model.id,
+					status,
+				});
 				const result = await runSubagent(
 					ctx.cwd,
 					model,
@@ -522,29 +771,19 @@ function createSubagentTool(advisorAvailable: boolean) {
 					params.task,
 					signal,
 					onUpdate
-						? (text) =>
+						? (status) =>
 								onUpdate({
-									content: [{ type: "text", text }],
-									details: {
-										tier,
-										provider: model.provider,
-										model: model.id,
-										exitCode: 0,
-										usage: {
-											input: 0,
-											output: 0,
-											cacheRead: 0,
-											cacheWrite: 0,
-											cost: 0,
-											turns: 0,
-										},
-										truncated: false,
-										totalLines: text.split("\n").length,
-									},
+									content: [],
+									details: statusDetails(status),
 								})
 						: undefined,
 				);
-				if (signal?.aborted || result.stopReason === "aborted") return failure("cancelled");
+				if (signal?.aborted || result.stopReason === "aborted") {
+					return {
+						content: [{ type: "text" as const, text: "[Subagent failed: cancelled]" }],
+						details: statusDetails({ phase: "cancelled", summary: "Cancelled" }),
+					};
+				}
 
 				const rawOutput =
 					result.finalOutput ||
@@ -552,10 +791,17 @@ function createSubagentTool(advisorAvailable: boolean) {
 					result.stderr ||
 					(result.exitCode === 0 ? "(subagent returned no text)" : `pi exited with code ${result.exitCode}`);
 				const output = await truncateOutput(rawOutput);
+				const failed = result.exitCode !== 0 || result.stopReason === "error";
 				const details: SubagentDetails = {
 					tier,
 					provider: model.provider,
 					model: model.id,
+					status: failed
+						? {
+								phase: "failed",
+								summary: compactLine(result.errorMessage ?? result.stderr, `Exited with code ${result.exitCode}`),
+							}
+						: finishedStatus(model, result.usage),
 					exitCode: result.exitCode,
 					stopReason: result.stopReason,
 					usage: result.usage,
@@ -564,7 +810,7 @@ function createSubagentTool(advisorAvailable: boolean) {
 					fullOutputPath: output.fullOutputPath,
 				};
 
-				if (result.exitCode !== 0 || result.stopReason === "error") {
+				if (failed) {
 					return {
 						content: [{ type: "text" as const, text: `[Subagent failed]\n${output.content}` }],
 						details,
@@ -572,8 +818,23 @@ function createSubagentTool(advisorAvailable: boolean) {
 				}
 				return { content: [{ type: "text" as const, text: output.content }], details };
 			} catch (error: unknown) {
-				if (signal?.aborted) return failure("cancelled");
-				return failure(error instanceof Error ? error.message : String(error));
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: signal?.aborted ? "[Subagent failed: cancelled]" : `[Subagent failed: ${message}]`,
+						},
+					],
+					details: {
+						tier,
+						provider: model.provider,
+						model: model.id,
+						status: signal?.aborted
+							? { phase: "cancelled", summary: "Cancelled" }
+							: { phase: "failed", summary: compactLine(message, "Failed") },
+					} satisfies SubagentDetails,
+				};
 			}
 		},
 	};

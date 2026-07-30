@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import registerSubagent, {
+	createSubagentTool,
 	createSubagentParameters,
+	formatStatusLine,
+	formatToolActivity,
 	getPiInvocation,
 	isAdvisorAvailable,
 	isSameModel,
 	resolveSubagentSettings,
+	SubagentProgressTracker,
+	taskSubject,
 } from "../extensions/subagent.ts";
 
 describe("subagent settings", () => {
@@ -109,6 +114,115 @@ describe("pi child invocation", () => {
 			command: "C:\\tools\\bun.exe",
 			args: ["C:\\tools\\pi\\src\\main.ts", ...args],
 		});
+	});
+});
+
+describe("subagent progress", () => {
+	test("reduces tool, reasoning, and reply events to one status line", () => {
+		const tracker = new SubagentProgressTracker();
+
+		expect(
+			tracker.handle({
+				type: "message_start",
+				message: { role: "assistant" },
+			}),
+		).toEqual({ phase: "starting", summary: "Thinking..." });
+		expect(
+			tracker.handle({
+				type: "message_update",
+				assistantMessageEvent: { type: "thinking_delta", delta: "Checking authentication paths" },
+			}),
+		).toEqual({ phase: "reasoning", summary: "Checking authentication paths" });
+		expect(
+			tracker.handle({
+				type: "tool_execution_start",
+				toolCallId: "1",
+				toolName: "bash",
+				args: { command: 'rg -n "getAuth" packages' },
+			}),
+		).toEqual({ phase: "tool", summary: 'bash: rg -n "getAuth" packages' });
+		expect(
+			tracker.handle({
+				type: "tool_execution_end",
+				toolCallId: "1",
+				toolName: "bash",
+			}),
+		).toEqual({ phase: "starting", summary: "Continuing..." });
+		expect(
+			tracker.handle({
+				type: "message_end",
+				message: {
+					role: "toolResult",
+					content: [{ type: "text", text: "500 lines of internal tool output" }],
+				},
+			}),
+		).toBeUndefined();
+		expect(
+			tracker.handle({
+				type: "message_update",
+				assistantMessageEvent: {
+					type: "text_delta",
+					delta: "One finding.\n\nThe fallback can race.",
+				},
+			}),
+		).toEqual({ phase: "replying", summary: "The fallback can race." });
+	});
+
+	test("formats compact subjects, tool activities, and phase markers", () => {
+		expect(taskSubject("  Review auth\nwith supporting tests  ")).toBe("Review auth");
+		expect(formatToolActivity("web_search", { query: "current OAuth guidance" })).toBe(
+			"web search: current OAuth guidance",
+		);
+		expect(formatToolActivity("read", { path: "src/auth.ts" })).toBe("read: src/auth.ts");
+		expect(formatStatusLine({ phase: "tool", summary: "read: src/auth.ts" })).toBe(
+			"▸ read: src/auth.ts",
+		);
+		expect(formatStatusLine({ phase: "finished", summary: "Finished · 3 turns" })).toBe(
+			"✓ Finished · 3 turns",
+		);
+	});
+});
+
+describe("subagent rendering", () => {
+	const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
+	const theme = {
+		bold(text) {
+			return text;
+		},
+		fg(_color, text) {
+			return text;
+		},
+	};
+
+	test("uses one truncated topic line and one truncated status line", () => {
+		const tool = createSubagentTool(true);
+		const call = tool.renderCall(
+			{
+				task: "Review authentication error handling and compare every implementation path",
+				tier: "advisor",
+			},
+			theme,
+		);
+		const result = tool.renderResult(
+			{
+				content: [],
+				details: {
+					tier: "advisor",
+					provider: "anthropic",
+					model: "advisor",
+					status: { phase: "tool", summary: "bash: rg -n authentication packages" },
+				},
+			},
+			{ expanded: false, isPartial: true },
+			theme,
+			{ isError: false },
+		);
+
+		expect(call.render(40)).toHaveLength(1);
+		expect(plain(call.render(40)[0]).trimEnd()).toBe("advisor · Review authentication error...");
+		expect(result.render(40)).toHaveLength(1);
+		expect(plain(result.render(40)[0]).trimEnd()).toBe("▸ bash: rg -n authentication packages");
+		expect(tool.executionMode).toBe("parallel");
 	});
 });
 

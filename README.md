@@ -127,6 +127,12 @@ current pi thinking level. Reports larger than 2,000 lines or 50 KB are
 truncated, and the full output is saved to a temporary file whose path is
 included in the result.
 
+Each running subagent occupies one compact two-line tool box in the TUI. The
+first line shows its tier and task subject; the second shows its latest tool,
+reasoning, reply, or completion state. Internal tool calls and raw JSON events
+are not rendered as a nested transcript. Multiple subagent tool calls can run
+and update their boxes in parallel.
+
 ## Develop
 
 ```bash
