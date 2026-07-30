@@ -15,6 +15,7 @@ extensions/        # one extension per .ts file, default-exported factory (pi: E
   session-info.ts  # persists and injects fixed first-message time + first-turn model
   edit.ts          # overrides built-in `edit` -> versioned line-anchored hashline patches
   read.ts          # overrides built-in `read` -> hashline text snapshots + automatic vision fallback
+  write.ts         # wraps built-in `write` -> fresh hashline tags + safe prefix stripping
   subagent.ts      # isolated tool-using investigation, implementation, review, or advice
   codegraph.ts     # bridges codegraph's codegraph_explore MCP tool into a native pi tool
   web-search.ts    # web_search + web_fetch via Exa public MCP (no API key)
@@ -31,6 +32,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | _(none)_ | session-info.ts | Captures the first user message's date/time and selected model in one custom session entry, then appends the same fixed values to the system prompt on every turn and resume. |
 | `edit` | edit.ts | **Overrides built-in.** Accepts one `input` string containing one `[PATH#8HEXTAG]` section and multiple line-anchored `SWAP`, `CUT`, or `INS` hunks. Every hunk uses the original pre-edit line numbers; the complete batch is parsed and validated before one write. Rejects stale tags, invalid/overlapping ranges, and no-ops; preserves BOM + EOL. |
 | `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition`; text results become `[PATH#8HEXTAG]` plus `LINE:TEXT` rows consumed by `edit`. Native image handling remains intact, and models without image input route through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis. |
+| `write` | write.ts | **Overrides built-in.** Wraps `createWriteToolDefinition`, preserving native full-file writes and rendering. Successful writes return a fresh `[PATH#8HEXTAG]` computed from disk. Complete numbered snapshots copied from `read` are stripped only after path, sequence, completeness, and live-tag validation; copied rewrites preserve BOM + EOL. |
 | `subagent` | subagent.ts | Runs an isolated in-memory pi agent session with focused read, shell, edit, codegraph, and web tools. Defaults to a peer model (the current model unless configured); dynamically exposes an `advisor` tier only when a separately configured different model is available. Delegated tasks state whether edits are authorized. Each call renders as a compact two-line task/status box and exports its full transcript to `%TEMP%\pi-subagent-<session-id>.jsonl`. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |

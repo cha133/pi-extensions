@@ -9,6 +9,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `session-info.ts` | Captures the first user message's date/time and selected model, then reuses those fixed values after model switches and resume |
 | `edit.ts` | **Overrides built-in `edit`** with compact, version-tagged hashline patches; one call can atomically apply multiple line-anchored `SWAP`, `CUT`, and `INS` hunks |
 | `read.ts` | **Overrides built-in `read`** with numbered hashline text snapshots; images are automatically routed to the current model or a configured fallback vision model |
+| `write.ts` | **Overrides built-in `write`** while preserving its `path`/`content` interface; returns a fresh hashline tag and safely strips complete numbered snapshots copied from `read` |
 | `subagent.ts` | `subagent` - delegates independent investigation, implementation, and review to an isolated tool-using peer or a configured higher-capability advisor |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
@@ -33,6 +34,7 @@ Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discove
 | `session-info` | None |
 | `edit` | None (no extra runtime deps; reuses pi's diff helpers) |
 | `read` | A `vision` model configured in `~/.pi/agent/settings.json` for use when the current model cannot consume images |
+| `write` | None; wraps pi's native full-file writer |
 | `subagent` | None; optionally configure peer and advisor models under `subagent` in `~/.pi/agent/settings.json` |
 | `codegraph` | `codegraph` CLI on PATH; a project must be indexed (`codegraph init`) for queries to work |
 | `web-search` | Network access to `https://mcp.exa.ai/mcp` |
@@ -83,6 +85,16 @@ INS.POST 2:
 coordinates and are validated before one write. A stale tag, invalid range,
 overlap, or no-op rejects the entire call. Re-read after a successful edit
 before issuing another patch.
+
+`write` keeps pi's ordinary `{ path, content }` full-file interface and native
+directory creation, write queue, cancellation, and rendering. After writing,
+it hashes the actual file on disk and returns a fresh `[PATH#TAG]`, allowing
+the model to follow with `edit` using the content it just wrote. If `content`
+is a complete numbered snapshot copied from `read`, the wrapper removes the
+header and `LINE:` prefixes only after verifying that the rows start at 1 and
+are consecutive, the read was not partial, the paths match, and the tag is
+still current. Verified copied rewrites preserve the existing BOM, line
+endings, and final newline. Ordinary content is never prefix-stripped.
 
 For images when the current model already supports image input, `read` keeps
 pi's native result. Otherwise it sends the native reader's processed image to
