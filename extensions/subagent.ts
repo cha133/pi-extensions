@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { TruncatedText } from "@earendil-works/pi-tui";
+import { sliceByColumn, type Component, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	CONFIG_DIR_NAME,
@@ -282,6 +282,11 @@ export function isAdvisorAvailable(
 
 export function createSubagentParameters(advisorAvailable: boolean) {
 	const properties = {
+		title: Type.String({
+			description: "A concise human-readable title for this delegated task",
+			minLength: 1,
+			maxLength: 80,
+		}),
 		task: Type.String({
 			description:
 				"A self-contained delegated task stating the objective, relevant context, constraints, and expected deliverable",
@@ -317,13 +322,43 @@ function compactLine(value: unknown, fallback = "..."): string {
 	return line || fallback;
 }
 
+interface StyledSegment {
+	text: string;
+	style: (text: string) => string;
+}
+
+/**
+ * Render styled segments on one line, clipping at the viewport edge without an
+ * ellipsis. Segments are sliced before styling so truncation never inserts an
+ * ANSI reset between the tool-shell background and visible trailing text.
+ */
+class DirectTruncatedLine implements Component {
+	constructor(private readonly segments: StyledSegment[]) {}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		let remaining = Math.max(0, width);
+		let line = "";
+		for (const segment of this.segments) {
+			if (remaining === 0) break;
+			const text = sliceByColumn(segment.text, 0, remaining, true);
+			const textWidth = visibleWidth(text);
+			if (textWidth > 0) line += segment.style(text);
+			remaining -= textWidth;
+			if (textWidth < visibleWidth(segment.text)) break;
+		}
+		return [line];
+	}
+}
+
 function recentParagraphLine(value: string): string {
 	const paragraphs = value.trim().split(/\r?\n\s*\r?\n/);
 	return compactLine(paragraphs.at(-1));
 }
 
-export function taskSubject(task: string): string {
-	return compactLine(task, "Untitled task");
+export function taskTitle(title: string): string {
+	return compactLine(title, "Untitled task");
 }
 
 function argumentRecord(value: unknown): Record<string, unknown> {
@@ -695,6 +730,7 @@ export function createSubagentTool(advisorAvailable: boolean) {
 		promptSnippet: "Delegate independent investigation, implementation, or review to a tool-using subagent",
 		promptGuidelines: [
 			"Use subagent for a focused investigation, implementation, independent cross-check, or review that can proceed autonomously; keep routine work in the main agent.",
+			"Give each delegated task a concise, human-readable title for the tool display.",
 			"Give the subagent a self-contained task with the objective, relevant context, constraints, expected deliverable, and an explicit statement of whether file modifications are authorized; do not copy the full conversation.",
 			"Use the default peer tier for normal parallel exploration and review. Use advisor only when it is available and the judgment or audit materially benefits from the configured higher-capability model.",
 			"Treat subagent output as evidence and advice rather than authority; reconcile it with primary evidence before answering or acting.",
@@ -702,10 +738,15 @@ export function createSubagentTool(advisorAvailable: boolean) {
 		],
 		executionMode: "parallel" as const,
 		parameters: createSubagentParameters(advisorAvailable),
-		renderCall(args: { task: string; tier?: unknown }, theme: any) {
+		renderCall(args: { title: string; task: string; tier?: unknown }, theme: any) {
 			const tier = args.tier === "advisor" ? "advisor" : "peer";
-			const prefix = theme.fg("toolTitle", theme.bold(`${tier} · `));
-			return new TruncatedText(prefix + theme.fg("accent", taskSubject(args.task)));
+			return new DirectTruncatedLine([
+				{
+					text: `subagent · ${tier} · `,
+					style: (text) => theme.fg("toolTitle", theme.bold(text)),
+				},
+				{ text: taskTitle(args.title), style: (text) => theme.fg("accent", text) },
+			]);
 		},
 		renderResult(
 			result: { content: Array<{ type: string; text?: string }>; details?: unknown },
@@ -724,11 +765,13 @@ export function createSubagentTool(advisorAvailable: boolean) {
 						: status.phase === "cancelled"
 							? "warning"
 							: "muted";
-			return new TruncatedText(theme.fg(color, formatStatusLine(status)));
+			return new DirectTruncatedLine([
+				{ text: formatStatusLine(status), style: (text) => theme.fg(color, text) },
+			]);
 		},
 		async execute(
 			_toolCallId: string,
-			params: { task: string; tier?: unknown },
+			params: { title: string; task: string; tier?: unknown },
 			signal: AbortSignal | undefined,
 			onUpdate: AgentToolUpdateCallback<SubagentDetails | undefined> | undefined,
 			ctx: ExtensionContext,

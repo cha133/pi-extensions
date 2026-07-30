@@ -12,7 +12,7 @@ import registerSubagent, {
 	runSubagent,
 	SUBAGENT_TOOLS,
 	SubagentProgressTracker,
-	taskSubject,
+	taskTitle,
 } from "../extensions/subagent.ts";
 
 describe("subagent settings", () => {
@@ -72,18 +72,21 @@ describe("subagent tier availability", () => {
 });
 
 describe("subagent parameters", () => {
-	test("exposes only task when advisor is unavailable", () => {
+	test("requires a title and task when advisor is unavailable", () => {
 		const schema = createSubagentParameters(false);
+		expect(schema.properties).toHaveProperty("title");
 		expect(schema.properties).toHaveProperty("task");
 		expect(schema.properties).not.toHaveProperty("tier");
-		expect(schema.required).toEqual(["task"]);
+		expect(schema.required).toEqual(["title", "task"]);
+		expect(schema.properties.title.maxLength).toBe(80);
 	});
 
 	test("adds an optional peer/advisor tier when advisor is available", () => {
 		const schema = createSubagentParameters(true);
+		expect(schema.properties).toHaveProperty("title");
 		expect(schema.properties).toHaveProperty("task");
 		expect(schema.properties).toHaveProperty("tier");
-		expect(schema.required).toEqual(["task"]);
+		expect(schema.required).toEqual(["title", "task"]);
 		expect(schema.properties.tier.default).toBe("peer");
 		expect(schema.properties.tier.anyOf.map((item) => item.const)).toEqual(["peer", "advisor"]);
 	});
@@ -154,7 +157,7 @@ describe("subagent progress", () => {
 	});
 
 	test("formats compact subjects, tool activities, and phase markers", () => {
-		expect(taskSubject("  Review auth\nwith supporting tests  ")).toBe("Review auth");
+		expect(taskTitle("  Review auth\nwith supporting tests  ")).toBe("Review auth");
 		expect(formatToolActivity("web_search", { query: "current OAuth guidance" })).toBe(
 			"web search: current OAuth guidance",
 		);
@@ -396,6 +399,7 @@ describe("subagent rendering", () => {
 		const tool = createSubagentTool(true);
 		const call = tool.renderCall(
 			{
+				title: "Audit auth errors",
 				task: "Review authentication error handling and compare every implementation path",
 				tier: "advisor",
 			},
@@ -417,10 +421,57 @@ describe("subagent rendering", () => {
 		);
 
 		expect(call.render(40)).toHaveLength(1);
-		expect(plain(call.render(40)[0]).trimEnd()).toBe("advisor · Review authentication error...");
+		expect(plain(call.render(40)[0]).trimEnd()).toBe("subagent · advisor · Audit auth errors");
 		expect(result.render(40)).toHaveLength(1);
 		expect(plain(result.render(40)[0]).trimEnd()).toBe("▸ bash: rg -n authentication packages");
 		expect(tool.executionMode).toBe("parallel");
+	});
+
+	test("clips styled lines without an ellipsis or global ANSI reset", () => {
+		const ansiTheme = {
+			bold(text) {
+				return `\x1b[1m${text}\x1b[22m`;
+			},
+			fg(_color, text) {
+				return `\x1b[36m${text}\x1b[39m`;
+			},
+		};
+		const tool = createSubagentTool(false);
+		const callLine = tool
+			.renderCall(
+				{
+					title: "A very long title that must be clipped",
+					task: "Inspect the implementation without modifying files.",
+				},
+				ansiTheme,
+			)
+			.render(28)[0];
+		const resultLine = tool
+			.renderResult(
+				{
+					content: [],
+					details: {
+						tier: "peer",
+						provider: "openai",
+						model: "peer",
+						status: {
+							phase: "replying",
+							summary: "A very long streamed status that must be clipped",
+						},
+					},
+				},
+				{ expanded: false, isPartial: true },
+				ansiTheme,
+				{ isError: false },
+			)
+			.render(28)[0];
+
+		expect(plain(callLine)).toBe("subagent · peer · A very lon");
+		expect(plain(resultLine)).toHaveLength(28);
+		expect(callLine).not.toContain("...");
+		expect(resultLine).not.toContain("...");
+		expect(callLine).not.toContain("\x1b[0m");
+		expect(resultLine).not.toContain("\x1b[0m");
 	});
 });
 
