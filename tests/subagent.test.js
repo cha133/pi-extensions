@@ -4,10 +4,11 @@ import registerSubagent, {
 	createSubagentParameters,
 	formatStatusLine,
 	formatToolActivity,
-	getPiInvocation,
 	isAdvisorAvailable,
 	isSameModel,
 	resolveSubagentSettings,
+	runSubagent,
+	SUBAGENT_TOOLS,
 	SubagentProgressTracker,
 	taskSubject,
 } from "../extensions/subagent.ts";
@@ -86,34 +87,16 @@ describe("subagent parameters", () => {
 	});
 });
 
-describe("pi child invocation", () => {
-	test("does not pass a Windows Bun virtual script path as a prompt argument", () => {
-		const args = ["--mode", "json"];
-		const invocation = getPiInvocation(args, {
-			currentScript: "B:/~BUN/root/pi.exe",
-			execPath: "C:\\Scoop\\shims\\pi.exe",
-			fileExists: () => false,
-		});
-
-		expect(invocation).toEqual({
-			command: "C:\\Scoop\\shims\\pi.exe",
-			args,
-		});
-		expect(invocation.args).not.toContain("B:/~BUN/root/pi.exe");
-	});
-
-	test("keeps a real runtime script when pi is launched through Bun", () => {
-		const args = ["--mode", "json"];
-		const invocation = getPiInvocation(args, {
-			currentScript: "C:\\tools\\pi\\src\\main.ts",
-			execPath: "C:\\tools\\bun.exe",
-			fileExists: () => true,
-		});
-
-		expect(invocation).toEqual({
-			command: "C:\\tools\\bun.exe",
-			args: ["C:\\tools\\pi\\src\\main.ts", ...args],
-		});
+describe("subagent tools", () => {
+	test("matches the main pi tool surface without legacy grep, find, or ls tools", () => {
+		expect(SUBAGENT_TOOLS).toEqual([
+			"read",
+			"bash",
+			"edit",
+			"codegraph_explore",
+			"web_search",
+			"web_fetch",
+		]);
 	});
 });
 
@@ -174,12 +157,205 @@ describe("subagent progress", () => {
 			"web search: current OAuth guidance",
 		);
 		expect(formatToolActivity("read", { path: "src/auth.ts" })).toBe("read: src/auth.ts");
+		expect(formatToolActivity("edit", { path: "src/auth.ts" })).toBe("edit: src/auth.ts");
 		expect(formatStatusLine({ phase: "tool", summary: "read: src/auth.ts" })).toBe(
 			"▸ read: src/auth.ts",
 		);
 		expect(formatStatusLine({ phase: "finished", summary: "Finished · 3 turns" })).toBe(
 			"✓ Finished · 3 turns",
 		);
+	});
+});
+
+describe("subagent SDK session", () => {
+	const model = { provider: "openai", id: "peer" };
+
+	function assistant(text, stopReason = "stop") {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			stopReason,
+			usage: {
+				input: 120,
+				output: 30,
+				cacheRead: 10,
+				cacheWrite: 5,
+				cost: { total: 0.02 },
+			},
+		};
+	}
+
+	test("collects direct SDK events and gracefully shuts down the in-memory session", async () => {
+		const actions = [];
+		const statuses = [];
+		let listener;
+		let receivedOptions;
+		const session = {
+			subscribe(value) {
+				listener = value;
+				return () => actions.push("unsubscribe");
+			},
+			async prompt(task) {
+				actions.push(`prompt:${task}`);
+				listener({ type: "message_start", message: assistant("") });
+				listener({
+					type: "tool_execution_start",
+					toolCallId: "tool-1",
+					toolName: "read",
+					args: { path: "src/auth.ts" },
+				});
+				listener({
+					type: "tool_execution_end",
+					toolCallId: "tool-1",
+					toolName: "read",
+				});
+				listener({ type: "message_end", message: assistant("Direct SDK report") });
+			},
+			async abort() {
+				actions.push("abort");
+			},
+			extensionRunner: {
+				async emit(event) {
+					actions.push(`${event.type}:${event.reason}`);
+				},
+			},
+			dispose() {
+				actions.push("dispose");
+			},
+		};
+
+		const result = await runSubagent(
+			"C:\\repo",
+			model,
+			"high",
+			false,
+			"Review auth",
+			undefined,
+			(status) => statuses.push(status),
+			async (options) => {
+				receivedOptions = options;
+				return session;
+			},
+		);
+
+		expect(receivedOptions).toEqual({
+			cwd: "C:\\repo",
+			model,
+			thinkingLevel: "high",
+			projectTrusted: false,
+		});
+		expect(result).toEqual({
+			finalOutput: "Direct SDK report",
+			stopReason: "stop",
+			errorMessage: undefined,
+			usage: {
+				input: 120,
+				output: 30,
+				cacheRead: 10,
+				cacheWrite: 5,
+				cost: 0.02,
+				turns: 1,
+			},
+		});
+		expect(statuses).toContainEqual({ phase: "tool", summary: "read: src/auth.ts" });
+		expect(actions).toEqual([
+			"prompt:Review auth",
+			"unsubscribe",
+			"abort",
+			"session_shutdown:quit",
+			"dispose",
+		]);
+	});
+
+	test("propagates cancellation through session.abort and still performs cleanup", async () => {
+		const controller = new AbortController();
+		const actions = [];
+		let startPrompt;
+		let releasePrompt;
+		const started = new Promise((resolve) => {
+			startPrompt = resolve;
+		});
+		const blocked = new Promise((resolve) => {
+			releasePrompt = resolve;
+		});
+		const session = {
+			subscribe() {
+				return () => actions.push("unsubscribe");
+			},
+			async prompt() {
+				actions.push("prompt");
+				startPrompt();
+				await blocked;
+			},
+			async abort() {
+				actions.push("abort");
+				releasePrompt();
+			},
+			extensionRunner: {
+				async emit() {
+					actions.push("shutdown");
+				},
+			},
+			dispose() {
+				actions.push("dispose");
+			},
+		};
+
+		const running = runSubagent(
+			"C:\\repo",
+			model,
+			"medium",
+			true,
+			"Long review",
+			controller.signal,
+			undefined,
+			async () => session,
+		);
+		await started;
+		controller.abort();
+		const result = await running;
+
+		expect(result.stopReason).toBe("aborted");
+		expect(actions.filter((action) => action === "abort")).toHaveLength(2);
+		expect(actions.slice(-3)).toEqual(["abort", "shutdown", "dispose"]);
+	});
+
+	test("returns prompt failures after gracefully shutting down the session", async () => {
+		const actions = [];
+		const session = {
+			subscribe() {
+				return () => actions.push("unsubscribe");
+			},
+			async prompt() {
+				throw new Error("authentication expired");
+			},
+			async abort() {
+				actions.push("abort");
+			},
+			extensionRunner: {
+				async emit() {
+					actions.push("shutdown");
+				},
+			},
+			dispose() {
+				actions.push("dispose");
+			},
+		};
+
+		const result = await runSubagent(
+			"C:\\repo",
+			model,
+			"medium",
+			true,
+			"Review",
+			undefined,
+			undefined,
+			async () => session,
+		);
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("authentication expired");
+		expect(actions).toEqual(["unsubscribe", "abort", "shutdown", "dispose"]);
 	});
 });
 

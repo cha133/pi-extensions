@@ -9,7 +9,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `session-info.ts` | Captures the first user message's date/time and selected model, then reuses those fixed values after model switches and resume |
 | `edit.ts` | **Overrides built-in `edit`** with multi-strategy fuzzy matching (Exact -> IndentFlexible -> LineTrimmed -> WhitespaceNorm -> EscapeNorm -> PartialLineIndent -> BlockAnchor), plus a matching-aware renderer that avoids the built-in exact preview |
 | `read.ts` | **Overrides built-in `read`** while preserving its native behavior; images are automatically routed to the current model or a configured fallback vision model |
-| `subagent.ts` | `subagent` - delegates independent research and review to an isolated tool-using peer or a configured higher-capability advisor |
+| `subagent.ts` | `subagent` - delegates independent investigation, implementation, and review to an isolated tool-using peer or a configured higher-capability advisor |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
 
@@ -86,11 +86,13 @@ vision model.
 
 ### Configure `subagent`
 
-The `subagent` tool delegates a self-contained research or review task to an
-isolated pi process with its own context and the `read`, `bash`, `grep`, `find`,
-`ls`, `codegraph_explore`, `web_search`, and `web_fetch` tools. It is intended
-for autonomous investigation and advice, so its fixed instructions prohibit
-workspace mutations and spawning further agents.
+The `subagent` tool delegates a self-contained investigation, implementation,
+or review task to an
+isolated in-memory pi session with its own context and the `read`, `bash`, `edit`,
+`codegraph_explore`, `web_search`, and `web_fetch` tools. It is intended
+for autonomous investigation, implementation, and advice. The delegated task
+must explicitly state whether file modifications are authorized; without that
+authorization the subagent remains read-only. Subagents cannot spawn further agents.
 
 With no additional settings, the default `peer` tier inherits the current
 model. Optionally configure either tier under `subagent` in
@@ -112,7 +114,7 @@ model. Optionally configure either tier under `subagent` in
 ```
 
 Both objects are optional. A configured model must already be available to pi;
-the child process reuses pi's normal model registry and authentication. Trusted
+the in-memory session uses pi's normal model discovery and authentication. Trusted
 project settings may override either tier in `.pi/settings.json`.
 
 The tool accepts a required `task` and, only when useful, an optional `tier`.

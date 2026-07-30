@@ -298,8 +298,17 @@ class CodeGraphMcpClient {
 // Session-level state: current client and startup cwd
 // ---------------------------------------------------------------------------
 
-let client: CodeGraphMcpClient | null = null;
-let sessionCwd: string | null = null;
+interface CodeGraphSessionState {
+	client: CodeGraphClient | null;
+	cwd: string | null;
+}
+
+export interface CodeGraphClient {
+	callTool(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any>;
+	stop(): void;
+}
+
+export type CodeGraphClientFactory = (cwd: string) => CodeGraphClient;
 
 /** The only codegraph tool exposed by this extension. */
 const CODEGRAPH_TOOL = "codegraph_explore";
@@ -341,8 +350,8 @@ function hasDefaultCodegraphProject(cwd: string): boolean {
  * local index because projectPath resolves the target at call time and the server can
  * start without a default project. Idempotent.
  */
-function activateCodeGraphTool(pi: ExtensionAPI, cwd: string): void {
-	sessionCwd = cwd;
+function activateCodeGraphTool(pi: ExtensionAPI, cwd: string, state: CodeGraphSessionState): void {
+	state.cwd = cwd;
 	const active = pi.getActiveTools();
 	if (!active.includes(CODEGRAPH_TOOL)) {
 		pi.setActiveTools([...active, CODEGRAPH_TOOL]);
@@ -354,18 +363,20 @@ function activateCodeGraphTool(pi: ExtensionAPI, cwd: string): void {
  * The server can run without a default project and resolve each target through
  * projectPath; if the agent omits it, codegraph raises NotIndexedError.
  */
-function getClient(): CodeGraphMcpClient {
-	if (!client) client = new CodeGraphMcpClient(sessionCwd ?? process.cwd());
-	return client;
+function getClient(state: CodeGraphSessionState, createClient: CodeGraphClientFactory): CodeGraphClient {
+	if (!state.client) state.client = createClient(state.cwd ?? process.cwd());
+	return state.client;
 }
 
 /** Convert an MCP tools/call result into a truncated Pi ToolResult with summary details. */
 async function forwardToCodegraph(
+	state: CodeGraphSessionState,
+	createClient: CodeGraphClientFactory,
 	toolName: string,
 	args: Record<string, unknown>,
 	signal?: AbortSignal,
 ) {
-	const c = getClient();
+	const c = getClient(state, createClient);
 	const result = await c.callTool(toolName, args, signal);
 	const content: any[] = result?.content ?? [];
 	const text = content
@@ -422,7 +433,12 @@ function renderCodegraphResult(
  * matching codegraph's withRequiredProjectPath behavior when there is no default project.
  * A required schema field is more salient to the model than a prose guideline.
  */
-function registerExploreTool(pi: ExtensionAPI, projectPathRequired: boolean): void {
+function registerExploreTool(
+	pi: ExtensionAPI,
+	projectPathRequired: boolean,
+	state: CodeGraphSessionState,
+	createClient: CodeGraphClientFactory,
+): void {
 	pi.registerTool({
 		name: "codegraph_explore",
 		label: "CodeGraph Explore",
@@ -465,31 +481,39 @@ function registerExploreTool(pi: ExtensionAPI, projectPathRequired: boolean): vo
 			return renderCodegraphResult(r, o, theme, "explore");
 		},
 		async execute(_id, params, signal) {
-			return forwardToCodegraph("codegraph_explore", params, signal);
+			return forwardToCodegraph(state, createClient, "codegraph_explore", params, signal);
 		},
 	});
 }
 
-export default function (pi: ExtensionAPI) {
-	registerExploreTool(pi, /*projectPathRequired*/ false);
+export function registerCodeGraph(
+	pi: ExtensionAPI,
+	createClient: CodeGraphClientFactory = (cwd) => new CodeGraphMcpClient(cwd),
+): void {
+	const state: CodeGraphSessionState = { client: null, cwd: null };
+	registerExploreTool(pi, /*projectPathRequired*/ false, state, createClient);
 
 	// --- Session lifecycle: tool activation and child-process cleanup ---
 	pi.on("session_start", (_event, ctx) => {
-		sessionCwd = ctx.cwd;
+		state.cwd = ctx.cwd;
 		// If no usable index exists at or above the session directory, re-register with
 		// projectPath required. Check codegraph.db rather than the directory alone to avoid
 		// mistaking a home-level global configuration directory for a project index.
 		if (!hasDefaultCodegraphProject(ctx.cwd)) {
-			registerExploreTool(pi, /*projectPathRequired*/ true);
+			registerExploreTool(pi, /*projectPathRequired*/ true, state, createClient);
 		}
-		activateCodeGraphTool(pi, ctx.cwd);
+		activateCodeGraphTool(pi, ctx.cwd, state);
 	});
 
 	pi.on("session_shutdown", () => {
-		if (client) {
-			client.stop();
-			client = null;
+		if (state.client) {
+			state.client.stop();
+			state.client = null;
 		}
-		sessionCwd = null;
+		state.cwd = null;
 	});
+}
+
+export default function (pi: ExtensionAPI) {
+	registerCodeGraph(pi);
 }
