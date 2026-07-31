@@ -1,14 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import registerEdit, {
 	applyHashlinePatch,
 	computeHashlineTag,
 	parseHashlinePatch,
 } from "../extensions/edit.ts";
+import {
+	recordCompleteHashlineContent,
+	recordHashlineRange,
+} from "../extensions/lib/hashline-state.ts";
 
-function patch(body, path = "example.txt", tag = "A1B2C3D4") {
+const SESSION_ID = "edit-test-session";
+
+function patch(body, path = "example.txt", tag = "A1B2C3D4E5F60718") {
 	return `[${path}#${tag}]\n${body}`;
 }
 
@@ -20,6 +27,20 @@ function registerDefinition() {
 		},
 	});
 	return definition;
+}
+
+function executionContext(directory, path, content) {
+	const absolutePath = resolve(directory, path);
+	recordCompleteHashlineContent(
+		SESSION_ID,
+		absolutePath,
+		computeHashlineTag(content),
+		content === "" ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0),
+	);
+	return {
+		cwd: directory,
+		sessionManager: { getSessionId: () => SESSION_ID },
+	};
 }
 
 describe("hashline parser", () => {
@@ -46,7 +67,7 @@ describe("hashline parser", () => {
 		);
 
 		expect(parsed.path).toBe("example.txt");
-		expect(parsed.tag).toBe("A1B2C3D4");
+		expect(parsed.tag).toBe("A1B2C3D4E5F60718");
 		expect(parsed.hunks.map((hunk) => hunk.kind)).toEqual([
 			"swap",
 			"swap",
@@ -70,7 +91,7 @@ describe("hashline parser", () => {
 	});
 
 	test("accepts lowercase hex in a copied header and canonicalizes it", () => {
-		expect(parseHashlinePatch(patch("CUT 1", "x", "abcdef12")).tag).toBe("ABCDEF12");
+		expect(parseHashlinePatch(patch("CUT 1", "x", "abcdef1234567890")).tag).toBe("ABCDEF1234567890");
 	});
 
 	test("rejects a missing header", () => {
@@ -79,7 +100,7 @@ describe("hashline parser", () => {
 
 	test("rejects a second file section", () => {
 		expect(() =>
-			parseHashlinePatch(`${patch("CUT 1")}\n[other.txt#11223344]\nCUT 1`),
+			parseHashlinePatch(`${patch("CUT 1")}\n[other.txt#1122334455667788]\nCUT 1`),
 		).toThrow("only one file section");
 	});
 
@@ -229,13 +250,13 @@ describe("edit registration and execution", () => {
 				},
 				undefined,
 				undefined,
-				{ cwd: directory },
+				executionContext(directory, path, original),
 			);
 			expect(await readFile(path, "utf8")).toBe(
 				"\uFEFFalpha\r\nBETA\r\ngamma\r\ndelta\r\n",
 			);
 			expect(result.content[0].text).toContain("Applied 2 hashline hunks");
-			expect(result.content[0].text).toMatch(/#[0-9A-F]{8}\]/);
+			expect(result.content[0].text).toMatch(/#[0-9A-F]{16}\]/);
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
@@ -251,10 +272,10 @@ describe("edit registration and execution", () => {
 			await expect(
 				definition.execute(
 					"tool-call",
-					{ input: `[${path}#00000000]\nSWAP 1:\n+changed` },
+					{ input: `[${path}#0000000000000000]\nSWAP 1:\n+changed` },
 					undefined,
 					undefined,
-					{ cwd: directory },
+					executionContext(directory, path, "current\n"),
 				),
 			).rejects.toThrow("Stale hashline tag");
 			expect(await readFile(path, "utf8")).toBe("current\n");
@@ -278,7 +299,7 @@ describe("edit registration and execution", () => {
 					{ input: `[${path}#${tag}]\nSWAP 1:\n+ONE\nSWAP 99:\n+bad` },
 					undefined,
 					undefined,
-					{ cwd: directory },
+					executionContext(directory, path, original),
 				),
 			).rejects.toThrow("line 99 does not exist");
 			expect(await readFile(path, "utf8")).toBe(original);
@@ -302,10 +323,76 @@ describe("edit registration and execution", () => {
 					{ input: `[${path}#${tag}]\nSWAP 1:\n+same` },
 					undefined,
 					undefined,
-					{ cwd: directory },
+					executionContext(directory, path, original),
 				),
 			).rejects.toThrow("produced no change");
 		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("rejects edits outside the lines shown by read", async () => {
+		const definition = registerDefinition();
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-unseen-"));
+		const path = join(directory, "example.txt");
+		const original = "one\ntwo\nthree\n";
+		await writeFile(path, original, "utf8");
+		const tag = computeHashlineTag(original);
+		recordHashlineRange(SESSION_ID, path, tag, 3, 1, 1);
+
+		try {
+			await expect(
+				definition.execute(
+					"tool-call",
+					{ input: `[${path}#${tag}]\nSWAP 2:\n+TWO` },
+					undefined,
+					undefined,
+					{ cwd: directory, sessionManager: { getSessionId: () => SESSION_ID } },
+				),
+			).rejects.toThrow("were not shown by read");
+			expect(await readFile(path, "utf8")).toBe(original);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("shares Pi's file mutation queue", async () => {
+		const definition = registerDefinition();
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-queue-"));
+		const path = join(directory, "example.txt");
+		const original = "one\n";
+		await writeFile(path, original, "utf8");
+		const tag = computeHashlineTag(original);
+		let release;
+		let markAcquired;
+		const acquired = new Promise((resolveAcquired) => {
+			markAcquired = resolveAcquired;
+		});
+		const gate = new Promise((resolveGate) => {
+			release = resolveGate;
+		});
+		const holding = withFileMutationQueue(path, async () => {
+			markAcquired();
+			await gate;
+		});
+		await acquired;
+
+		try {
+			const editing = definition.execute(
+				"tool-call",
+				{ input: `[${path}#${tag}]\nSWAP 1:\n+ONE` },
+				undefined,
+				undefined,
+				executionContext(directory, path, original),
+			);
+			await Bun.sleep(10);
+			expect(await readFile(path, "utf8")).toBe(original);
+			release();
+			await Promise.all([holding, editing]);
+			expect(await readFile(path, "utf8")).toBe("ONE\n");
+		} finally {
+			release();
+			await holding;
 			await rm(directory, { recursive: true, force: true });
 		}
 	});

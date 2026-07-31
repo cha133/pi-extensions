@@ -32,6 +32,8 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
+type ThinkingLevel = ReturnType<ExtensionAPI["getThinkingLevel"]>;
+
 export const SUBAGENT_TOOLS = [
 	"read",
 	"bash",
@@ -484,7 +486,7 @@ function messageText(message: JsonAssistantMessage | undefined): string {
 interface SubagentSessionOptions {
 	cwd: string;
 	model: Model<any>;
-	thinkingLevel: ExtensionContext["thinkingLevel"];
+	thinkingLevel: ThinkingLevel;
 	projectTrusted: boolean;
 }
 
@@ -544,7 +546,7 @@ function exportSubagentTranscript(session: AgentSession): string {
 export async function runSubagent(
 	cwd: string,
 	model: Model<any>,
-	thinkingLevel: ExtensionContext["thinkingLevel"],
+	thinkingLevel: ThinkingLevel,
 	projectTrusted: boolean,
 	task: string,
 	signal: AbortSignal | undefined,
@@ -723,7 +725,10 @@ function fallbackResultStatus(
 	return { phase: "finished", summary: "Finished" };
 }
 
-export function createSubagentTool(advisorAvailable: boolean) {
+export function createSubagentTool(
+	advisorAvailable: boolean,
+	getThinkingLevel: () => ThinkingLevel = () => "off",
+) {
 	return {
 		name: "subagent",
 		label: "Subagent",
@@ -810,7 +815,7 @@ export function createSubagentTool(advisorAvailable: boolean) {
 				const result = await runSubagent(
 					ctx.cwd,
 					model,
-					ctx.thinkingLevel,
+					getThinkingLevel(),
 					ctx.isProjectTrusted(),
 					params.task,
 					signal,
@@ -909,7 +914,7 @@ export function registerSubagent(pi: ExtensionAPI) {
 		const advisorAvailable = resolveAdvisorForSchema(ctx);
 		if (advisorAvailable === lastAdvisorAvailability) return;
 		lastAdvisorAvailability = advisorAvailable;
-		pi.registerTool(createSubagentTool(advisorAvailable));
+		pi.registerTool(createSubagentTool(advisorAvailable, () => pi.getThinkingLevel()));
 	};
 
 	pi.on("session_start", (_event, ctx) => refresh(ctx));

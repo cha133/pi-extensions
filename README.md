@@ -7,7 +7,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
 | `shell-guidance.ts` | Adds system-prompt guidance to use ripgrep for discovery/search and move non-trivial shell logic into temporary Bun scripts; registers no tool |
 | `session-info.ts` | Captures the first user message's date/time and selected model, then reuses those fixed values after model switches and resume |
-| `edit.ts` | **Overrides built-in `edit`** with compact, version-tagged hashline patches; one call can atomically apply multiple line-anchored `SWAP`, `CUT`, and `INS` hunks |
+| `edit.ts` | **Overrides built-in `edit`** with compact, version-tagged hashline patches; one call validates multiple line-anchored `SWAP`, `CUT`, and `INS` hunks before one write |
 | `read.ts` | **Overrides built-in `read`** with numbered hashline text snapshots; images are automatically routed to the current model or a configured fallback vision model |
 | `write.ts` | **Overrides built-in `write`** while preserving its `path`/`content` interface; returns a fresh hashline tag and safely strips complete numbered snapshots copied from `read` |
 | `subagent.ts` | `subagent` - delegates independent investigation, implementation, and review to an isolated tool-using peer or a configured higher-capability advisor |
@@ -60,10 +60,10 @@ that model must declare `"image"` in its supported inputs. The overridden
 environment variables. The extension does not store a separate API key.
 
 For text files, `read` preserves pi's native access checks and limits, then
-returns an eight-hex whole-file tag and numbered source rows:
+returns a sixteen-hex whole-file tag and numbered source rows:
 
 ```text
-[src/example.ts#7A31C9E2]
+[src/example.ts#7A31C9E2D84F106B]
 1:export const value = 1;
 2:console.log(value);
 ```
@@ -72,7 +72,7 @@ The `edit` tool consumes that header and the original line numbers. A single
 call may contain several non-overlapping hunks:
 
 ```text
-[src/example.ts#7A31C9E2]
+[src/example.ts#7A31C9E2D84F106B]
 SWAP 1:
 +export const value = 2;
 INS.POST 2:
@@ -82,13 +82,16 @@ INS.POST 2:
 `SWAP N:` or `SWAP N.=M:` replaces inclusive lines, `CUT N` or
 `CUT N.=M` deletes them, and `INS.PRE N:`, `INS.POST N:`, `INS.HEAD:`, or
 `INS.TAIL:` inserts literal `+TEXT` rows. All hunks use the same pre-edit
-coordinates and are validated before one write. A stale tag, invalid range,
-overlap, or no-op rejects the entire call. Re-read after a successful edit
-before issuing another patch.
+coordinates and are validated before one write. Only lines actually displayed by
+`read` for that file revision may be replaced, deleted, or used as insertion
+anchors. A stale tag, unseen line, invalid range, overlap, or no-op rejects the
+entire call. Re-read after a successful edit before issuing another patch. Calls
+to `edit` share Pi's file mutation queue with native `write`, preventing concurrent
+in-process mutations of the same file from overwriting each other.
 
 `write` keeps pi's ordinary `{ path, content }` full-file interface and native
 directory creation, write queue, cancellation, and rendering. After writing,
-it hashes the actual file on disk and returns a fresh `[PATH#TAG]`, allowing
+it hashes the successfully committed content and returns a fresh `[PATH#TAG]`, allowing
 the model to follow with `edit` using the content it just wrote. If `content`
 is a complete numbered snapshot copied from `read`, the wrapper removes the
 header and `LINE:` prefixes only after verifying that the rows start at 1 and

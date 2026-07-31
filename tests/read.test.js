@@ -10,6 +10,10 @@ import registerRead, {
 	resolveVisionConfig,
 } from "../extensions/read.ts";
 import { computeHashlineTag as computeEditHashlineTag } from "../extensions/edit.ts";
+import {
+	coversHashlineRange,
+	getHashlineCoverage,
+} from "../extensions/lib/hashline-state.ts";
 
 describe("read hashline formatting", () => {
 	test("uses the same normalized tag as edit", () => {
@@ -171,12 +175,23 @@ describe("read override registration", () => {
 				{ path: "example.txt" },
 				undefined,
 				undefined,
-				{ cwd: directory, model: { input: ["text"] } },
+				{
+					cwd: directory,
+					model: { input: ["text"] },
+					sessionManager: { getSessionId: () => "read-test-session" },
+				},
 			);
 
 			expect(result.content[0].text).toBe(
 				`[example.txt#${computeHashlineTag("alpha\nbeta\n")}]\n1:alpha\n2:beta`,
 			);
+			const coverage = getHashlineCoverage(
+				"read-test-session",
+				path,
+				computeHashlineTag("alpha\nbeta\n"),
+			);
+			expect(coverage).toBeDefined();
+			expect(coversHashlineRange(coverage, 1, 2)).toBe(true);
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

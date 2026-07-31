@@ -2,8 +2,8 @@
  * Hashline-aware write -- wrap pi's built-in full-file writer.
  *
  * Ordinary `{ path, content }` calls retain native directory creation, mutation
- * queuing, cancellation, and rendering. Successful writes prepend a fresh eight-hex
- * hashline header computed from the actual bytes on disk, so a following edit can use
+ * queuing, cancellation, and rendering. Successful writes prepend a fresh sixteen-hex
+ * hashline header computed from the successfully committed content, so a following edit can use
  * the new version without another read.
  *
  * When content is a complete hashline snapshot copied from read, the wrapper verifies
@@ -21,8 +21,13 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+	HASHLINE_TAG_LENGTH,
+	HASHLINE_TAG_PATTERN,
+	recordCompleteHashlineContent,
+} from "./lib/hashline-state.js";
 
-const HEADER_RE = /^\[(.+)#([0-9A-Fa-f]{8})\]$/;
+const HEADER_RE = new RegExp(`^\\[(.+)#(${HASHLINE_TAG_PATTERN})\\]$`);
 const NUMBERED_LINE_RE = /^([1-9]\d*):(.*)$/;
 const READ_NOTICE_RE =
 	/^\[(?:Showing lines |\d+ more lines in file\.|Line \d+ is |File is empty\.)/;
@@ -70,7 +75,7 @@ export function computeHashlineTag(text: string): string {
 	return createHash("sha256")
 		.update(normalizeToLF(stripBom(text).text), "utf8")
 		.digest("hex")
-		.slice(0, 8)
+		.slice(0, HASHLINE_TAG_LENGTH)
 		.toUpperCase();
 }
 
@@ -221,14 +226,24 @@ export default function (pi: ExtensionAPI): void {
 					onUpdate,
 					toolCtx,
 				);
-				const written = await readFile(
-					resolveLocalPath(params.path, toolCtx.cwd),
-					"utf8",
+				const absolutePath = resolveLocalPath(params.path, toolCtx.cwd);
+				// Native write commits this exact string while holding Pi's mutation queue.
+				// Base the returned revision on it so a later competing write makes edit fail
+				// stale instead of accidentally grounding the model in unknown disk content.
+				const normalizedWritten = normalizeToLF(stripBom(content).text);
+				const writtenLines = normalizedWritten === ""
+					? 0
+					: normalizedWritten.split("\n").length - (normalizedWritten.endsWith("\n") ? 1 : 0);
+				recordCompleteHashlineContent(
+					toolCtx.sessionManager.getSessionId(),
+					absolutePath,
+					computeHashlineTag(normalizedWritten),
+					writtenLines,
 				);
 				prependResultHeader(
 					result,
 					params.path,
-					computeHashlineTag(written),
+					computeHashlineTag(normalizedWritten),
 					copied !== undefined,
 				);
 				return result;

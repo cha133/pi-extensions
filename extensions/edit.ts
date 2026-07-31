@@ -1,7 +1,7 @@
 /**
  * Hashline edit -- override the built-in edit tool with versioned line-anchored patches.
  *
- * Text reads expose an eight-hex whole-file tag and numbered lines. The model copies
+ * Text reads expose a sixteen-hex whole-file tag and numbered lines. The model copies
  * that header into one edit input and addresses every change against the original line
  * numbers. All hunks are parsed and validated before a single write, so a stale tag,
  * invalid range, overlap, or no-op rejects the complete batch without a partial edit.
@@ -16,6 +16,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
 	generateDiffString,
 	generateUnifiedPatch,
+	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
@@ -24,6 +25,12 @@ import { access, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { Type } from "typebox";
+import {
+	coversHashlineRange,
+	getHashlineCoverage,
+	HASHLINE_TAG_LENGTH,
+	HASHLINE_TAG_PATTERN,
+} from "./lib/hashline-state.js";
 
 const editSchema = Type.Object({
 	input: Type.String({
@@ -32,8 +39,7 @@ const editSchema = Type.Object({
 	}),
 });
 
-const HASH_LENGTH = 8;
-const HEADER_RE = /^\[(.+)#([0-9A-Fa-f]{8})\]$/;
+const HEADER_RE = new RegExp(`^\\[(.+)#(${HASHLINE_TAG_PATTERN})\\]$`);
 const RANGE_RE = "([1-9]\\d*)(?:\\.=(\\d+))?";
 
 type LineEnding = "\r\n" | "\n";
@@ -114,7 +120,7 @@ export function computeHashlineTag(text: string): string {
 	return createHash("sha256")
 		.update(normalizeToLF(stripBom(text).text), "utf8")
 		.digest("hex")
-		.slice(0, HASH_LENGTH)
+		.slice(0, HASHLINE_TAG_LENGTH)
 		.toUpperCase();
 }
 
@@ -350,6 +356,47 @@ function validateNoOverlap(edits: ConcreteEdit[]): void {
 	}
 }
 
+function validateSeenHunks(
+	hunks: ParsedHunk[],
+	coverage: NonNullable<ReturnType<typeof getHashlineCoverage>>,
+): void {
+	for (const hunk of hunks) {
+		if (hunk.kind === "swap" || hunk.kind === "cut") {
+			if (!coversHashlineRange(coverage, hunk.start, hunk.end)) {
+				throw new Error(
+					`Patch line ${hunk.sourceLine}: source lines ${hunk.start}-${hunk.end} were not shown by read for this file revision. Read that range before editing it.`,
+				);
+			}
+			continue;
+		}
+
+		if (hunk.position === "head") {
+			if (coverage.lineCount > 0 && !coversHashlineRange(coverage, 1, 1)) {
+				throw new Error(
+					`Patch line ${hunk.sourceLine}: the start of the file was not shown by read for this revision. Read line 1 before using INS.HEAD.`,
+				);
+			}
+			continue;
+		}
+		if (hunk.position === "tail") {
+			if (
+				coverage.lineCount > 0 &&
+				!coversHashlineRange(coverage, coverage.lineCount, coverage.lineCount)
+			) {
+				throw new Error(
+					`Patch line ${hunk.sourceLine}: the end of the file was not shown by read for this revision. Read the final line before using INS.TAIL.`,
+				);
+			}
+			continue;
+		}
+		if (!coversHashlineRange(coverage, hunk.anchor!, hunk.anchor!)) {
+			throw new Error(
+				`Patch line ${hunk.sourceLine}: anchor line ${hunk.anchor} was not shown by read for this file revision. Read that line before inserting around it.`,
+			);
+		}
+	}
+}
+
 export function applyHashlinePatch(content: string, hunks: ParsedHunk[]): string {
 	const split = splitFileLines(content);
 	const edits = concretizeHunks(hunks, split.lines.length);
@@ -397,11 +444,11 @@ export default function (pi: ExtensionAPI): void {
 		name: "edit",
 		label: "edit",
 		description:
-			"Apply one versioned, line-anchored patch to an existing file. Copy [PATH#TAG] and line numbers from the latest read. Multiple non-overlapping hunks apply atomically against the original line numbers.",
+			"Apply one versioned, line-anchored patch to an existing file. Copy [PATH#TAG] and displayed line numbers from read. Multiple non-overlapping hunks are validated together against the original line numbers before one write.",
 		parameters: editSchema,
 		promptSnippet: "Apply a compact hashline patch with one or more line-anchored hunks",
 		promptGuidelines: [
-			"Before editing a text file, use read and copy its [PATH#TAG] header. The tag prevents edits against stale line numbers.",
+			"Before editing a text file, use read and copy its [PATH#TAG] header. Only lines actually shown by read for that revision may be changed or used as insertion anchors.",
 			"Patch syntax: SWAP N: or SWAP N.=M: replaces original inclusive lines with following +TEXT rows; CUT N or CUT N.=M deletes original lines.",
 			"Use INS.PRE N:, INS.POST N:, INS.HEAD:, or INS.TAIL: for pure insertions. Every SWAP/INS body row begins with +; + alone inserts a blank line.",
 			"Put all non-overlapping changes for one file in one edit call. Every hunk uses line numbers from the same pre-edit read; body length does not affect later anchors.",
@@ -452,66 +499,76 @@ export default function (pi: ExtensionAPI): void {
 			}
 			const parsed = parseHashlinePatch(rawInput);
 			const absolutePath = resolvePath(parsed.path, ctx.cwd);
+			const sessionId = ctx.sessionManager.getSessionId();
 
 			const throwIfAborted = (): void => {
 				if (signal?.aborted) throw new Error("Operation aborted");
 			};
-			throwIfAborted();
+			return withFileMutationQueue(absolutePath, async () => {
+				throwIfAborted();
+				try {
+					await access(absolutePath, constants.R_OK | constants.W_OK);
+				} catch (error: unknown) {
+					const code =
+						error instanceof Error && "code" in error
+							? ` (code: ${(error as NodeJS.ErrnoException).code})`
+							: "";
+					throw new Error(`Could not edit file: ${parsed.path}${code}.`);
+				}
+				throwIfAborted();
 
-			try {
-				await access(absolutePath, constants.R_OK | constants.W_OK);
-			} catch (error: unknown) {
-				const code =
-					error instanceof Error && "code" in error
-						? ` (code: ${(error as NodeJS.ErrnoException).code})`
-						: "";
-				throw new Error(`Could not edit file: ${parsed.path}${code}.`);
-			}
-			throwIfAborted();
+				const buffer = await readFile(absolutePath);
+				throwIfAborted();
+				const rawContent = buffer.toString("utf8");
+				const { bom, text } = stripBom(rawContent);
+				const originalEnding = detectLineEnding(text);
+				const content = normalizeToLF(text);
+				const actualTag = computeHashlineTag(content);
+				if (actualTag !== parsed.tag) {
+					throw new Error(
+						`Stale hashline tag for ${parsed.path}: patch has #${parsed.tag}, current file is #${actualTag}. Re-read the file and rebuild the patch from the new line numbers.`,
+					);
+				}
+				const newContent = applyHashlinePatch(content, parsed.hunks);
+				const coverage = getHashlineCoverage(sessionId, absolutePath, parsed.tag);
+				if (!coverage) {
+					throw new Error(
+						`No read coverage is recorded for ${parsed.path}#${parsed.tag}. Read the target lines in this session before editing them.`,
+					);
+				}
+				validateSeenHunks(parsed.hunks, coverage);
 
-			const buffer = await readFile(absolutePath);
-			throwIfAborted();
-			const rawContent = buffer.toString("utf8");
-			const { bom, text } = stripBom(rawContent);
-			const originalEnding = detectLineEnding(text);
-			const content = normalizeToLF(text);
-			const actualTag = computeHashlineTag(content);
-			if (actualTag !== parsed.tag) {
-				throw new Error(
-					`Stale hashline tag for ${parsed.path}: patch has #${parsed.tag}, current file is #${actualTag}. Re-read the file and rebuild the patch from the new line numbers.`,
+				if (newContent === content) {
+					throw new Error(
+						`Hashline patch for ${parsed.path} produced no change. Re-read the file and verify the target lines.`,
+					);
+				}
+				throwIfAborted();
+
+				await writeFile(
+					absolutePath,
+					bom + restoreLineEndings(newContent, originalEnding),
+					"utf8",
 				);
-			}
+				throwIfAborted();
 
-			const newContent = applyHashlinePatch(content, parsed.hunks);
-			if (newContent === content) {
-				throw new Error(
-					`Hashline patch for ${parsed.path} produced no change. Re-read the file and verify the target lines.`,
-				);
-			}
-			throwIfAborted();
-
-			await writeFile(
-				absolutePath,
-				bom + restoreLineEndings(newContent, originalEnding),
-				"utf8",
-			);
-
-			const diffResult = generateDiffString(content, newContent);
-			const patch = generateUnifiedPatch(parsed.path, content, newContent);
-			const newTag = computeHashlineTag(newContent);
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `[${parsed.path}#${newTag}]\nApplied ${parsed.hunks.length} hashline hunk${parsed.hunks.length === 1 ? "" : "s"}. Re-read before the next edit.`,
+				const diffResult = generateDiffString(content, newContent);
+				const patch = generateUnifiedPatch(parsed.path, content, newContent);
+				const newTag = computeHashlineTag(newContent);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `[${parsed.path}#${newTag}]\nApplied ${parsed.hunks.length} hashline hunk${parsed.hunks.length === 1 ? "" : "s"}. Re-read before the next edit.`,
+						},
+					],
+					details: {
+						diff: diffResult.diff,
+						patch,
+						firstChangedLine: diffResult.firstChangedLine,
 					},
-				],
-				details: {
-					diff: diffResult.diff,
-					patch,
-					firstChangedLine: diffResult.firstChangedLine,
-				},
-			};
+				};
+			});
 		},
 	});
 }

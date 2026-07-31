@@ -7,7 +7,7 @@
  * processed image to the vision model selected by the `vision` object in
  * ~/.pi/agent/settings.json and returns the description as the read result.
  *
- * Text results are reformatted as hashline snapshots: an eight-hex whole-file
+ * Text results are reformatted as hashline snapshots: a sixteen-hex whole-file
  * tag followed by 1-indexed `LINE:TEXT` rows. The edit extension consumes those
  * anchors so models can address several changes without reproducing old text.
  */
@@ -31,6 +31,12 @@ import {
 	type ExtensionContext,
 	type ReadToolDetails,
 } from "@earendil-works/pi-coding-agent";
+import {
+	clearHashlineSession,
+	HASHLINE_TAG_LENGTH,
+	recordCompleteHashlineContent,
+	recordHashlineRange,
+} from "./lib/hashline-state.js";
 
 const SYSTEM_PROMPTS = {
 	brief:
@@ -99,7 +105,7 @@ export function computeHashlineTag(text: string): string {
 	return createHash("sha256")
 		.update(normalizeToLF(stripBom(text)), "utf8")
 		.digest("hex")
-		.slice(0, 8)
+		.slice(0, HASHLINE_TAG_LENGTH)
 		.toUpperCase();
 }
 
@@ -108,6 +114,16 @@ function splitFileLines(content: string): string[] {
 	const lines = content.split("\n");
 	if (content.endsWith("\n")) lines.pop();
 	return lines;
+}
+
+function displayedHashlineRange(output: string): { start: number; end: number } | undefined {
+	const numbers = output
+		.split("\n")
+		.map((line) => /^(\d+):/.exec(line))
+		.filter((match): match is RegExpExecArray => match !== null)
+		.map((match) => Number(match[1]));
+	if (numbers.length === 0) return undefined;
+	return { start: numbers[0], end: numbers[numbers.length - 1] };
 }
 
 /**
@@ -351,6 +367,10 @@ async function describeImage(
 export default function (pi: ExtensionAPI) {
 	let registeredCwd: string | undefined;
 
+	pi.on("session_shutdown", (_event, ctx) => {
+		clearHashlineSession(ctx.sessionManager.getSessionId());
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		if (registeredCwd === ctx.cwd) {
 			return;
@@ -417,16 +437,39 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const textPath = nativeParams.path;
-				const rawContent = await readFile(resolveLocalPath(textPath, toolCtx.cwd), "utf8");
+				const absolutePath = resolveLocalPath(textPath, toolCtx.cwd);
+				const rawContent = await readFile(absolutePath, "utf8");
+				const formatted = formatHashlineRead(rawContent, {
+					path: textPath,
+					offset: nativeParams.offset,
+					limit: nativeParams.limit,
+				});
+				const normalized = normalizeToLF(stripBom(rawContent));
+				const lineCount = splitFileLines(normalized).length;
+				const displayed = displayedHashlineRange(formatted);
+				if (displayed) {
+					recordHashlineRange(
+						toolCtx.sessionManager.getSessionId(),
+						absolutePath,
+						computeHashlineTag(normalized),
+						lineCount,
+						displayed.start,
+						displayed.end,
+					);
+				} else if (lineCount === 0) {
+					// Record the empty revision so INS.HEAD/INS.TAIL can initialize it.
+					recordCompleteHashlineContent(
+						toolCtx.sessionManager.getSessionId(),
+						absolutePath,
+						computeHashlineTag(normalized),
+						0,
+					);
+				}
 				return {
 					content: [
 						{
 							type: "text" as const,
-							text: formatHashlineRead(rawContent, {
-								path: textPath,
-								offset: nativeParams.offset,
-								limit: nativeParams.limit,
-							}),
+							text: formatted,
 						},
 					],
 					details: result.details,

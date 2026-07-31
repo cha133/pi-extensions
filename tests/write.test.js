@@ -11,6 +11,12 @@ import registerEdit, {
 } from "../extensions/edit.ts";
 import { formatHashlineRead } from "../extensions/read.ts";
 
+const SESSION_ID = "write-test-session";
+
+function toolContext(cwd) {
+	return { cwd, sessionManager: { getSessionId: () => SESSION_ID } };
+}
+
 function registerDefinition(cwd) {
 	let sessionStart;
 	let definition;
@@ -39,11 +45,11 @@ function registerEditDefinition() {
 describe("copied hashline write parsing", () => {
 	test("strips a complete consecutive snapshot", () => {
 		const parsed = parseCopiedHashlineSnapshot(
-			"[example.txt#A1B2C3D4]\n1:alpha\n2:beta",
+			"[example.txt#A1B2C3D4E5F60718]\n1:alpha\n2:beta",
 		);
 		expect(parsed).toEqual({
 			path: "example.txt",
-			tag: "A1B2C3D4",
+			tag: "A1B2C3D4E5F60718",
 			content: "alpha\nbeta",
 		});
 	});
@@ -55,23 +61,23 @@ describe("copied hashline write parsing", () => {
 	test("rejects partial read output", () => {
 		expect(() =>
 			parseCopiedHashlineSnapshot(
-				"[example.txt#A1B2C3D4]\n1:alpha\n[2 more lines in file. Use offset=2 to continue.]",
+				"[example.txt#A1B2C3D4E5F60718]\n1:alpha\n[2 more lines in file. Use offset=2 to continue.]",
 			),
 		).toThrow("partial or non-editable read");
 	});
 
 	test("rejects non-consecutive or offset snapshots", () => {
 		expect(() =>
-			parseCopiedHashlineSnapshot("[example.txt#A1B2C3D4]\n2:beta"),
+			parseCopiedHashlineSnapshot("[example.txt#A1B2C3D4E5F60718]\n2:beta"),
 		).toThrow("expected line 1");
 		expect(() =>
-			parseCopiedHashlineSnapshot("[example.txt#A1B2C3D4]\n1:alpha\n3:gamma"),
+			parseCopiedHashlineSnapshot("[example.txt#A1B2C3D4E5F60718]\n1:alpha\n3:gamma"),
 		).toThrow("expected line 2");
 	});
 
 	test("rejects unnumbered rows under a hashline header", () => {
 		expect(() =>
-			parseCopiedHashlineSnapshot("[example.txt#A1B2C3D4]\nalpha"),
+			parseCopiedHashlineSnapshot("[example.txt#A1B2C3D4E5F60718]\nalpha"),
 		).toThrow("invalid row");
 	});
 });
@@ -92,7 +98,7 @@ describe("write override", () => {
 		expect(definition.promptGuidelines.join("\n")).toContain("partial, stale");
 	});
 
-	test("creates a normal file and returns a tag for actual disk content", async () => {
+	test("creates a normal file and returns a tag for committed content", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-write-"));
 		const definition = registerDefinition(directory);
 		const path = join("nested", "example.txt");
@@ -103,7 +109,7 @@ describe("write override", () => {
 				{ path, content: "alpha\n" },
 				undefined,
 				undefined,
-				{ cwd: directory },
+				toolContext(directory),
 			);
 			const written = await readFile(join(directory, path), "utf8");
 			expect(written).toBe("alpha\n");
@@ -126,7 +132,7 @@ describe("write override", () => {
 				{ path: "chain.txt", content: "alpha\nbeta\n" },
 				undefined,
 				undefined,
-				{ cwd: directory },
+				toolContext(directory),
 			);
 			const header = writeResult.content[0].text.split("\n")[0];
 			await editDefinition.execute(
@@ -134,7 +140,7 @@ describe("write override", () => {
 				{ input: `${header}\nSWAP 2:\n+BETA` },
 				undefined,
 				undefined,
-				{ cwd: directory },
+				toolContext(directory),
 			);
 
 			expect(await readFile(join(directory, "chain.txt"), "utf8")).toBe(
@@ -155,7 +161,7 @@ describe("write override", () => {
 				{ path: "literal.txt", content: "1:literal\n2:content" },
 				undefined,
 				undefined,
-				{ cwd: directory },
+				toolContext(directory),
 			);
 			expect(await readFile(join(directory, "literal.txt"), "utf8")).toBe(
 				"1:literal\n2:content",
@@ -182,7 +188,7 @@ describe("write override", () => {
 				{ path: "example.txt", content: snapshot },
 				undefined,
 				undefined,
-				{ cwd: directory },
+				toolContext(directory),
 			);
 			expect(await readFile(path, "utf8")).toBe("\uFEFFalpha\r\nBETA\r\n");
 			expect(result.content[0].text).toContain(
@@ -205,11 +211,11 @@ describe("write override", () => {
 					"tool-call",
 					{
 						path: "example.txt",
-						content: "[example.txt#00000000]\n1:replacement",
+						content: "[example.txt#0000000000000000]\n1:replacement",
 					},
 					undefined,
 					undefined,
-					{ cwd: directory },
+					toolContext(directory),
 				),
 			).rejects.toThrow("Stale hashline tag");
 			expect(await readFile(path, "utf8")).toBe("current\n");
@@ -234,7 +240,7 @@ describe("write override", () => {
 					},
 					undefined,
 					undefined,
-					{ cwd: directory },
+					toolContext(directory),
 				),
 			).rejects.toThrow("header targets other.txt");
 			expect(await readFile(join(directory, "target.txt"), "utf8")).toBe("current\n");
