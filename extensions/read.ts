@@ -30,13 +30,17 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ReadToolDetails,
+	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
 	clearHashlineSession,
 	HASHLINE_TAG_LENGTH,
+	HASHLINE_TAG_PATTERN,
 	recordCompleteHashlineContent,
 	recordHashlineRange,
 } from "./lib/hashline-state.js";
+
+const HASHLINE_HEADER_RE = new RegExp(`^\\[(.+)#(${HASHLINE_TAG_PATTERN})\\]$`);
 
 const SYSTEM_PROMPTS = {
 	brief:
@@ -124,6 +128,88 @@ function displayedHashlineRange(output: string): { start: number; end: number } 
 		.map((match) => Number(match[1]));
 	if (numbers.length === 0) return undefined;
 	return { start: numbers[0], end: numbers[numbers.length - 1] };
+}
+
+interface PersistedGrounding {
+	kind: "read" | "write";
+	path: string;
+	tag: string;
+	lines: number[];
+}
+
+function persistedGroundingFromEntry(entry: SessionEntry): PersistedGrounding | undefined {
+	if (entry.type !== "message" || entry.message.role !== "toolResult") return undefined;
+	const message = entry.message;
+	if (message.isError || (message.toolName !== "read" && message.toolName !== "write")) {
+		return undefined;
+	}
+	const text = message.content
+		.filter((part): part is { type: "text"; text: string } => part.type === "text")
+		.map((part) => part.text)
+		.join("\n");
+	const rows = normalizeToLF(text).split("\n");
+	const header = HASHLINE_HEADER_RE.exec(rows[0] ?? "");
+	if (!header) return undefined;
+	const lines = rows
+		.slice(1)
+		.map((row) => /^([1-9]\d*):/.exec(row))
+		.filter((match): match is RegExpExecArray => match !== null)
+		.map((match) => Number(match[1]));
+	return {
+		kind: message.toolName,
+		path: header[1],
+		tag: header[2].toUpperCase(),
+		lines,
+	};
+}
+
+/** Rebuild session-local grounding from successful read/write results on the active branch. */
+export async function restoreHashlineState(
+	entries: readonly SessionEntry[],
+	sessionId: string,
+	cwd: string,
+): Promise<number> {
+	clearHashlineSession(sessionId);
+	const records = entries
+		.map(persistedGroundingFromEntry)
+		.filter((record): record is PersistedGrounding => record !== undefined);
+	const liveFiles = new Map<string, { lineCount: number; tag: string } | undefined>();
+	let restored = 0;
+
+	for (const record of records) {
+		const absolutePath = resolveLocalPath(record.path, cwd);
+		let live = liveFiles.get(absolutePath);
+		if (!liveFiles.has(absolutePath)) {
+			try {
+				const raw = await readFile(absolutePath, "utf8");
+				const content = normalizeToLF(stripBom(raw));
+				live = {
+					lineCount: splitFileLines(content).length,
+					tag: computeHashlineTag(content),
+				};
+			} catch {
+				live = undefined;
+			}
+			liveFiles.set(absolutePath, live);
+		}
+		if (!live || live.tag !== record.tag) continue;
+
+		if (record.kind === "write" || live.lineCount === 0) {
+			recordCompleteHashlineContent(
+				sessionId,
+				absolutePath,
+				record.tag,
+				live.lineCount,
+			);
+			restored++;
+			continue;
+		}
+		for (const line of record.lines) {
+			recordHashlineRange(sessionId, absolutePath, record.tag, live.lineCount, line, line);
+		}
+		if (record.lines.length > 0) restored++;
+	}
+	return restored;
 }
 
 /**
@@ -370,8 +456,20 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", (_event, ctx) => {
 		clearHashlineSession(ctx.sessionManager.getSessionId());
 	});
+	pi.on("session_tree", async (_event, ctx) => {
+		await restoreHashlineState(
+			ctx.sessionManager.getBranch(),
+			ctx.sessionManager.getSessionId(),
+			ctx.cwd,
+		);
+	});
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
+		await restoreHashlineState(
+			ctx.sessionManager.getBranch(),
+			ctx.sessionManager.getSessionId(),
+			ctx.cwd,
+		);
 		if (registeredCwd === ctx.cwd) {
 			return;
 		}

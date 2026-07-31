@@ -87,7 +87,11 @@ coordinates and are validated before one write. Only lines actually displayed by
 anchors. A stale tag, unseen line, invalid range, overlap, or no-op rejects the
 entire call. Re-read after a successful edit before issuing another patch. Calls
 to `edit` share Pi's file mutation queue with native `write`, preventing concurrent
-in-process mutations of the same file from overwriting each other.
+in-process mutations of the same file from overwriting each other. On session resume,
+reload, fork, or tree navigation, displayed ranges are rebuilt from successful `read`
+and `write` results on the active branch. Each persisted tag is checked against the
+current file before its coverage is restored, so changed or missing files still require
+a fresh read.
 
 `write` keeps pi's ordinary `{ path, content }` full-file interface and native
 directory creation, write queue, cancellation, and rendering. After writing,

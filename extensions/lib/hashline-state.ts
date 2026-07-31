@@ -3,8 +3,9 @@
  *
  * Each file revision records the exact source-line intervals shown to the model.
  * Successful full-file writes record the complete resulting content because the model
- * supplied it directly. State is intentionally in-memory and is discarded on process
- * exit; a resumed session must read again before editing.
+ * supplied it directly. State is intentionally in-memory; the read extension rebuilds
+ * it from successful read/write tool results on the active session branch after a
+ * resume, reload, fork, or tree navigation.
  */
 
 import { resolve } from "node:path";

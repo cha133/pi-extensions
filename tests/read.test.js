@@ -8,6 +8,7 @@ import registerRead, {
 	formatHashlineRead,
 	needsVisionFallback,
 	resolveVisionConfig,
+	restoreHashlineState,
 } from "../extensions/read.ts";
 import { computeHashlineTag as computeEditHashlineTag } from "../extensions/edit.ts";
 import {
@@ -128,7 +129,7 @@ describe("read image query prompts", () => {
 });
 
 describe("read override registration", () => {
-	test("replaces read with one truthful, always-visible tool", () => {
+	test("replaces read with one truthful, always-visible tool", async () => {
 		let sessionStart;
 		let registered;
 		const pi = {
@@ -141,7 +142,14 @@ describe("read override registration", () => {
 		};
 
 		registerRead(pi);
-		sessionStart({}, { cwd: "C:\\workspace", isProjectTrusted: () => false });
+		await sessionStart({}, {
+			cwd: "C:\\workspace",
+			isProjectTrusted: () => false,
+			sessionManager: {
+				getBranch: () => [],
+				getSessionId: () => "registration-test-session",
+			},
+		});
 
 		expect(registered.name).toBe("read");
 		expect(registered.promptSnippet).toContain("version-tagged text snapshots");
@@ -169,7 +177,14 @@ describe("read override registration", () => {
 
 		try {
 			registerRead(pi);
-			sessionStart({}, { cwd: directory, isProjectTrusted: () => false });
+			await sessionStart({}, {
+				cwd: directory,
+				isProjectTrusted: () => false,
+				sessionManager: {
+					getBranch: () => [],
+					getSessionId: () => "read-test-session",
+				},
+			});
 			const result = await registered.execute(
 				"tool-call",
 				{ path: "example.txt" },
@@ -192,6 +207,93 @@ describe("read override registration", () => {
 			);
 			expect(coverage).toBeDefined();
 			expect(coversHashlineRange(coverage, 1, 2)).toBe(true);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("hashline resume restoration", () => {
+	test("rebuilds partial read coverage from the active session branch", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-resume-read-"));
+		const path = join(directory, "example.txt");
+		const content = "one\ntwo\nthree\n";
+		await writeFile(path, content, "utf8");
+		const tag = computeHashlineTag(content);
+		const entries = [
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName: "read",
+					toolCallId: "read-1",
+					isError: false,
+					content: [{ type: "text", text: `[example.txt#${tag}]\n2:two` }],
+				},
+			},
+		];
+
+		try {
+			expect(await restoreHashlineState(entries, "resume-read-session", directory)).toBe(1);
+			const coverage = getHashlineCoverage("resume-read-session", path, tag);
+			expect(coverage).toBeDefined();
+			expect(coversHashlineRange(coverage, 2, 2)).toBe(true);
+			expect(coversHashlineRange(coverage, 1, 1)).toBe(false);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("restores full coverage from a successful write result", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-resume-write-"));
+		const path = join(directory, "example.txt");
+		const content = "one\ntwo\n";
+		await writeFile(path, content, "utf8");
+		const tag = computeHashlineTag(content);
+		const entries = [
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName: "write",
+					toolCallId: "write-1",
+					isError: false,
+					content: [{ type: "text", text: `[example.txt#${tag}]\nSuccessfully wrote file` }],
+				},
+			},
+		];
+
+		try {
+			expect(await restoreHashlineState(entries, "resume-write-session", directory)).toBe(1);
+			const coverage = getHashlineCoverage("resume-write-session", path, tag);
+			expect(coverage).toBeDefined();
+			expect(coversHashlineRange(coverage, 1, 2)).toBe(true);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	test("does not restore coverage when the live file no longer matches the persisted tag", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-hashline-resume-stale-"));
+		const path = join(directory, "example.txt");
+		const oldTag = computeHashlineTag("old\n");
+		await writeFile(path, "new\n", "utf8");
+		const entries = [
+			{
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolName: "read",
+					toolCallId: "read-stale",
+					isError: false,
+					content: [{ type: "text", text: `[example.txt#${oldTag}]\n1:old` }],
+				},
+			},
+		];
+
+		try {
+			expect(await restoreHashlineState(entries, "resume-stale-session", directory)).toBe(0);
+			expect(getHashlineCoverage("resume-stale-session", path, oldTag)).toBeUndefined();
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
