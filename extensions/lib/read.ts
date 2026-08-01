@@ -16,7 +16,15 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { complete, type ImageContent, type UserMessage } from "@earendil-works/pi-ai/compat";
+import type { AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
+import {
+	stream,
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	type ImageContent,
+	type UserMessage,
+} from "@earendil-works/pi-ai/compat";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	createReadToolDefinition,
@@ -78,6 +86,17 @@ interface ModelWithInputs {
 
 interface NativeReadLikeResult {
 	content: Array<{ type: string; text?: string }>;
+}
+
+export type VisionReadPhase = "sending" | "thinking" | "reasoning" | "replying";
+
+export interface VisionReadStatus {
+	phase: VisionReadPhase;
+	summary: string;
+}
+
+interface VisionReadDetails extends ReadToolDetails {
+	visionStatus?: VisionReadStatus;
 }
 
 interface HashlineReadOptions {
@@ -357,6 +376,71 @@ function findImage(result: NativeReadLikeResult): ImageContent | undefined {
 	return result.content.find((part): part is ImageContent => part.type === "image");
 }
 
+function appendBounded(current: string, chunk: string): string {
+	const combined = current + chunk;
+	if (Buffer.byteLength(combined, "utf8") <= DEFAULT_MAX_BYTES) return combined;
+	return Buffer.from(combined, "utf8").subarray(-DEFAULT_MAX_BYTES).toString("utf8");
+}
+
+function recentParagraphLine(value: string, fallback: string): string {
+	const paragraphs = value.trim().split(/\r?\n\s*\r?\n/);
+	const line = (paragraphs.at(-1) ?? "")
+		.split(/\r?\n/, 1)[0]
+		.replace(/\s+/g, " ")
+		.trim();
+	return line || fallback;
+}
+
+export function formatVisionStatus(status: VisionReadStatus): string {
+	switch (status.phase) {
+		case "sending":
+		case "thinking":
+			return status.summary;
+		case "reasoning":
+			return `Reasoning: ${status.summary}`;
+		case "replying":
+			return `Replying: ${status.summary}`;
+	}
+}
+
+/** Reduce the vision model event stream to the latest useful one-line activity. */
+export class VisionProgressTracker {
+	private thinking = "";
+	private reply = "";
+	private status: VisionReadStatus = { phase: "sending", summary: "Sending image to model..." };
+
+	get current(): VisionReadStatus {
+		return this.status;
+	}
+
+	handle(event: AssistantMessageEvent): VisionReadStatus | undefined {
+		switch (event.type) {
+			case "start":
+				return this.set({ phase: "thinking", summary: "Model is thinking..." });
+			case "thinking_delta":
+				this.thinking = appendBounded(this.thinking, event.delta);
+				return this.set({
+					phase: "reasoning",
+					summary: recentParagraphLine(this.thinking, "Model is thinking..."),
+				});
+			case "text_delta":
+				this.reply = appendBounded(this.reply, event.delta);
+				return this.set({
+					phase: "replying",
+					summary: recentParagraphLine(this.reply, "Model is replying..."),
+				});
+			default:
+				return undefined;
+		}
+	}
+
+	private set(status: VisionReadStatus): VisionReadStatus | undefined {
+		if (status.phase === this.status.phase && status.summary === this.status.summary) return undefined;
+		this.status = status;
+		return status;
+	}
+}
+
 function fallbackFailure(message: string): { content: [{ type: "text"; text: string }]; details: undefined } {
 	return {
 		content: [{ type: "text", text: `[Vision fallback failed: ${message}]` }],
@@ -369,6 +453,7 @@ async function describeImage(
 	options: ImageReadOptions | undefined,
 	signal: AbortSignal | undefined,
 	ctx: ExtensionContext,
+	onUpdate: AgentToolUpdateCallback<VisionReadDetails | undefined> | undefined,
 ): Promise<{ content: [{ type: "text"; text: string }]; details: ReadToolDetails | undefined }> {
 	let config: VisionConfig;
 	try {
@@ -403,7 +488,36 @@ async function describeImage(
 	};
 
 	try {
-		const response = await complete(
+		const progress = new VisionProgressTracker();
+		let pendingStatus: VisionReadStatus | undefined;
+		let statusTimer: ReturnType<typeof setTimeout> | undefined;
+		let lastStatusUpdate = 0;
+		const flushStatus = () => {
+			if (!pendingStatus || !onUpdate) return;
+			onUpdate({ content: [], details: { visionStatus: pendingStatus } });
+			pendingStatus = undefined;
+			lastStatusUpdate = Date.now();
+		};
+		const publishStatus = (status: VisionReadStatus, immediate = false) => {
+			if (!onUpdate) return;
+			pendingStatus = status;
+			const elapsed = Date.now() - lastStatusUpdate;
+			if (immediate || elapsed >= 100) {
+				if (statusTimer) clearTimeout(statusTimer);
+				statusTimer = undefined;
+				flushStatus();
+				return;
+			}
+			if (!statusTimer) {
+				statusTimer = setTimeout(() => {
+					statusTimer = undefined;
+					flushStatus();
+				}, 100 - elapsed);
+			}
+		};
+		publishStatus(progress.current, true);
+
+		const responseStream = stream(
 			model,
 			{ systemPrompt: SYSTEM_PROMPTS[options?.detail ?? "standard"], messages: [userMessage] },
 			{
@@ -413,6 +527,21 @@ async function describeImage(
 				signal,
 			},
 		);
+		let response: AssistantMessage | undefined;
+		try {
+			for await (const event of responseStream) {
+				const status = progress.handle(event);
+				if (status) publishStatus(status);
+				if (event.type === "done") response = event.message;
+				if (event.type === "error") response = event.error;
+			}
+		} finally {
+			if (statusTimer) clearTimeout(statusTimer);
+			flushStatus();
+		}
+		if (!response) {
+			return fallbackFailure(`model "${modelName}" ended without a final response`);
+		}
 
 		if (response.stopReason === "aborted") {
 			return fallbackFailure("cancelled");
@@ -521,6 +650,18 @@ export function registerRead(pi: ExtensionAPI, state: HashlineState): void {
 				"Include any area to prioritize in image.query, and use image.detail when response depth matters.",
 				"Do not look for or call a separate image-viewing tool; read automatically routes images to a capable model.",
 			],
+			renderResult(result, options, theme, context) {
+				const details = result.details as VisionReadDetails | undefined;
+				if (options.isPartial && details?.visionStatus) {
+					return new Text(theme.fg("muted", formatVisionStatus(details.visionStatus)), 0, 0);
+				}
+				return nativeRead.renderResult!(
+					result as Parameters<NonNullable<typeof nativeRead.renderResult>>[0],
+					options,
+					theme,
+					context,
+				);
+			},
 			async execute(toolCallId, params, signal, onUpdate, toolCtx) {
 				const { image: imageOptions, ...nativeParams } = params;
 				const result = await nativeExecute(toolCallId, nativeParams, signal, onUpdate, toolCtx);
@@ -529,7 +670,7 @@ export function registerRead(pi: ExtensionAPI, state: HashlineState): void {
 					if (!image) {
 						return result;
 					}
-					return describeImage(image, imageOptions, signal, toolCtx);
+					return describeImage(image, imageOptions, signal, toolCtx, onUpdate);
 				}
 				if (isNativeImageResult(result)) {
 					return result;

@@ -6,10 +6,12 @@ import {
 	buildVisionPrompt,
 	computeHashlineTag,
 	formatHashlineRead,
+	formatVisionStatus,
 	needsVisionFallback,
 	registerRead,
 	resolveVisionConfig,
 	restoreHashlineState,
+	VisionProgressTracker,
 } from "../extensions/lib/read.ts";
 import { computeHashlineTag as computeEditHashlineTag } from "../extensions/lib/edit.ts";
 import {
@@ -131,6 +133,39 @@ describe("read image query prompts", () => {
 	});
 });
 
+describe("read vision fallback progress", () => {
+	test("moves from sending through thinking, reasoning, and reply text", () => {
+		const tracker = new VisionProgressTracker();
+		expect(formatVisionStatus(tracker.current)).toBe("Sending image to model...");
+
+		expect(
+			formatVisionStatus(tracker.handle({ type: "start", partial: {} })),
+		).toBe("Model is thinking...");
+		expect(
+			formatVisionStatus(
+				tracker.handle({ type: "thinking_delta", delta: "Inspecting the lower-right corner", partial: {} }),
+			),
+		).toBe("Reasoning: Inspecting the lower-right corner");
+		expect(
+			formatVisionStatus(
+				tracker.handle({ type: "text_delta", delta: "The dialog says connection failed.", partial: {} }),
+			),
+		).toBe("Replying: The dialog says connection failed.");
+	});
+
+	test("keeps only the latest paragraph on the dynamic line", () => {
+		const tracker = new VisionProgressTracker();
+		tracker.handle({ type: "start", partial: {} });
+		tracker.handle({ type: "thinking_delta", delta: "First observation.\n\n", partial: {} });
+		const status = tracker.handle({
+			type: "thinking_delta",
+			delta: "Second observation.\nMore detail.",
+			partial: {},
+		});
+		expect(formatVisionStatus(status)).toBe("Reasoning: Second observation.");
+	});
+});
+
 describe("read override registration", () => {
 	test("replaces read with one truthful, always-visible tool", async () => {
 		let sessionStart;
@@ -161,6 +196,13 @@ describe("read override registration", () => {
 		expect(registered.parameters.properties.image.properties).toHaveProperty("query");
 		expect(registered.parameters.properties.image.properties).toHaveProperty("detail");
 		expect(registered.parameters.properties.image.properties).not.toHaveProperty("region");
+		const progress = registered.renderResult(
+			{ content: [], details: { visionStatus: { phase: "thinking", summary: "Model is thinking..." } } },
+			{ expanded: false, isPartial: true },
+			{ fg: (_color, text) => text },
+			{},
+		);
+		expect(progress.render(80).join("\n")).toContain("Model is thinking...");
 	});
 
 	test("returns an editable hashline snapshot through the real native read path", async () => {
