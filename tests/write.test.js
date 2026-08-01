@@ -2,16 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import registerWrite, {
+import {
 	computeHashlineTag,
 	parseCopiedHashlineSnapshot,
-} from "../extensions/write.ts";
-import registerEdit, {
+	registerWrite,
+} from "../extensions/lib/write.ts";
+import {
 	computeHashlineTag as computeEditHashlineTag,
-} from "../extensions/edit.ts";
-import { formatHashlineRead } from "../extensions/read.ts";
+	registerEdit,
+} from "../extensions/lib/edit.ts";
+import { HashlineState } from "../extensions/lib/hashline-state.ts";
+import { formatHashlineRead } from "../extensions/lib/read.ts";
 
 const SESSION_ID = "write-test-session";
+const state = new HashlineState();
 
 function toolContext(cwd) {
 	return { cwd, sessionManager: { getSessionId: () => SESSION_ID } };
@@ -27,7 +31,7 @@ function registerDefinition(cwd) {
 		registerTool(tool) {
 			definition = tool;
 		},
-	});
+	}, state);
 	sessionStart({}, { cwd });
 	return definition;
 }
@@ -38,7 +42,7 @@ function registerEditDefinition() {
 		registerTool(tool) {
 			definition = tool;
 		},
-	});
+	}, state);
 	return definition;
 }
 

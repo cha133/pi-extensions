@@ -2,19 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import registerRead, {
+import {
 	buildVisionPrompt,
 	computeHashlineTag,
 	formatHashlineRead,
 	needsVisionFallback,
+	registerRead,
 	resolveVisionConfig,
 	restoreHashlineState,
-} from "../extensions/read.ts";
-import { computeHashlineTag as computeEditHashlineTag } from "../extensions/edit.ts";
+} from "../extensions/lib/read.ts";
+import { computeHashlineTag as computeEditHashlineTag } from "../extensions/lib/edit.ts";
 import {
 	coversHashlineRange,
-	getHashlineCoverage,
+	HashlineState,
 } from "../extensions/lib/hashline-state.ts";
+
+const state = new HashlineState();
 
 describe("read hashline formatting", () => {
 	test("uses the same normalized tag as edit", () => {
@@ -141,7 +144,7 @@ describe("read override registration", () => {
 			},
 		};
 
-		registerRead(pi);
+		registerRead(pi, state);
 		await sessionStart({}, {
 			cwd: "C:\\workspace",
 			isProjectTrusted: () => false,
@@ -176,7 +179,7 @@ describe("read override registration", () => {
 		await writeFile(path, "alpha\r\nbeta\r\n", "utf8");
 
 		try {
-			registerRead(pi);
+			registerRead(pi, state);
 			await sessionStart({}, {
 				cwd: directory,
 				isProjectTrusted: () => false,
@@ -200,7 +203,7 @@ describe("read override registration", () => {
 			expect(result.content[0].text).toBe(
 				`[example.txt#${computeHashlineTag("alpha\nbeta\n")}]\n1:alpha\n2:beta`,
 			);
-			const coverage = getHashlineCoverage(
+			const coverage = state.getCoverage(
 				"read-test-session",
 				path,
 				computeHashlineTag("alpha\nbeta\n"),
@@ -234,8 +237,8 @@ describe("hashline resume restoration", () => {
 		];
 
 		try {
-			expect(await restoreHashlineState(entries, "resume-read-session", directory)).toBe(1);
-			const coverage = getHashlineCoverage("resume-read-session", path, tag);
+			expect(await restoreHashlineState(entries, "resume-read-session", directory, state)).toBe(1);
+			const coverage = state.getCoverage("resume-read-session", path, tag);
 			expect(coverage).toBeDefined();
 			expect(coversHashlineRange(coverage, 2, 2)).toBe(true);
 			expect(coversHashlineRange(coverage, 1, 1)).toBe(false);
@@ -264,8 +267,8 @@ describe("hashline resume restoration", () => {
 		];
 
 		try {
-			expect(await restoreHashlineState(entries, "resume-write-session", directory)).toBe(1);
-			const coverage = getHashlineCoverage("resume-write-session", path, tag);
+			expect(await restoreHashlineState(entries, "resume-write-session", directory, state)).toBe(1);
+			const coverage = state.getCoverage("resume-write-session", path, tag);
 			expect(coverage).toBeDefined();
 			expect(coversHashlineRange(coverage, 1, 2)).toBe(true);
 		} finally {
@@ -292,8 +295,8 @@ describe("hashline resume restoration", () => {
 		];
 
 		try {
-			expect(await restoreHashlineState(entries, "resume-stale-session", directory)).toBe(0);
-			expect(getHashlineCoverage("resume-stale-session", path, oldTag)).toBeUndefined();
+			expect(await restoreHashlineState(entries, "resume-stale-session", directory, state)).toBe(0);
+			expect(state.getCoverage("resume-stale-session", path, oldTag)).toBeUndefined();
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

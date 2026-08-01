@@ -22,10 +22,10 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+	type HashlineState,
 	HASHLINE_TAG_LENGTH,
 	HASHLINE_TAG_PATTERN,
-	recordCompleteHashlineContent,
-} from "./lib/hashline-state.js";
+} from "./hashline-state.js";
 
 const HEADER_RE = new RegExp(`^\\[(.+)#(${HASHLINE_TAG_PATTERN})\\]$`);
 const NUMBERED_LINE_RE = /^([1-9]\d*):(.*)$/;
@@ -176,7 +176,7 @@ function prependResultHeader(
 	}
 }
 
-export default function (pi: ExtensionAPI): void {
+export function registerWrite(pi: ExtensionAPI, state: HashlineState): void {
 	let registeredCwd: string | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
@@ -234,7 +234,7 @@ export default function (pi: ExtensionAPI): void {
 				const writtenLines = normalizedWritten === ""
 					? 0
 					: normalizedWritten.split("\n").length - (normalizedWritten.endsWith("\n") ? 1 : 0);
-				recordCompleteHashlineContent(
+				state.recordComplete(
 					toolCtx.sessionManager.getSessionId(),
 					absolutePath,
 					computeHashlineTag(normalizedWritten),

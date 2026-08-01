@@ -9,13 +9,16 @@ the human-facing overview see `README.md`; for exact behavior read the source.
 ## Layout
 
 ```
-extensions/        # one extension per .ts file, default-exported factory (pi: ExtensionAPI) => void
+extensions/        # top-level extension entry points, each default-exporting a factory
   bash.ts          # overrides built-in `bash` -> runs PowerShell 7 (pwsh.exe)
   shell-guidance.ts # guides ripgrep discovery/search and temp Bun scripts for complex logic
   session-info.ts  # persists and injects fixed first-message time + first-turn model
-  edit.ts          # overrides built-in `edit` -> versioned line-anchored hashline patches
-  read.ts          # overrides built-in `read` -> hashline text snapshots + automatic vision fallback
-  write.ts         # wraps built-in `write` -> fresh hashline tags + safe prefix stripping
+  hashline.ts      # registers read/edit/write together with one shared grounding state
+  lib/             # non-discovered hashline implementations and explicit state object
+    edit.ts        # versioned line-anchored hashline patches
+    read.ts        # hashline text snapshots + automatic vision fallback
+    write.ts       # fresh hashline tags + safe prefix stripping
+    hashline-state.ts # session coverage injected into all three implementations
   subagent.ts      # isolated tool-using investigation, implementation, review, or advice
   codegraph.ts     # bridges codegraph's codegraph_explore MCP tool into a native pi tool
   web-search.ts    # web_search + web_fetch via Exa public MCP (no API key)
@@ -30,9 +33,9 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
 | `bash` | bash.ts | **Overrides built-in.** Runs `C:\Program Files\PowerShell\7\pwsh.exe` with `TERM=dumb` injected so the profile skips interactive init (starship/PSReadLine/zoxide) but keeps UTF-8 + mise. Reuses the built-in bash execute/stream/truncate/timeout/kill via `createBashTool`. |
 | _(none)_ | shell-guidance.ts | Adds system-prompt guidance via `before_agent_start`: use ripgrep for discovery/search, and move non-trivial shell logic into a temporary TypeScript/JavaScript file under `$env:TEMP` run with Bun. |
 | _(none)_ | session-info.ts | Captures the first user message's date/time and selected model in one custom session entry, then appends the same fixed values to the system prompt on every turn and resume. |
-| `edit` | edit.ts | **Overrides built-in.** Accepts one `input` string containing one `[PATH#16HEXTAG]` section and multiple line-anchored `SWAP`, `CUT`, or `INS` hunks. Every hunk uses the original pre-edit line numbers; the complete batch is parsed and validated before one queued write. Rejects stale tags, unseen lines, invalid/overlapping ranges, and no-ops; preserves BOM + EOL. |
-| `read` | read.ts | **Overrides built-in.** Wraps `createReadToolDefinition`; text results become `[PATH#16HEXTAG]` plus `LINE:TEXT` rows consumed by `edit`, and displayed line ranges are recorded for the current session. Resume/reload/fork/tree navigation rebuilds coverage from successful `read`/`write` results on the active branch after validating each tag against the live file. Native image handling remains intact, and models without image input route through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis. |
-| `write` | write.ts | **Overrides built-in.** Wraps `createWriteToolDefinition`, preserving native full-file writes and rendering. Successful writes return a fresh `[PATH#16HEXTAG]` computed from the committed content and record that content as seen. Complete numbered snapshots copied from `read` are stripped only after path, sequence, completeness, and live-tag validation; copied rewrites preserve BOM + EOL. |
+| `edit` | hashline.ts → lib/edit.ts | **Overrides built-in.** Accepts one `input` string containing one `[PATH#16HEXTAG]` section and multiple line-anchored `SWAP`, `CUT`, or `INS` hunks. Every hunk uses the original pre-edit line numbers; the complete batch is parsed and validated before one queued write. Rejects stale tags, unseen lines, invalid/overlapping ranges, and no-ops; preserves BOM + EOL. |
+| `read` | hashline.ts → lib/read.ts | **Overrides built-in.** Wraps `createReadToolDefinition`; text results become `[PATH#16HEXTAG]` plus `LINE:TEXT` rows consumed by `edit`, and displayed line ranges are recorded in the shared state created by `hashline.ts`. Resume/reload/fork/tree navigation rebuilds coverage from successful `read`/`write` results on the active branch after validating each tag against the live file. Native image handling remains intact, and models without image input route through the `vision` model selected in `~/.pi/agent/settings.json`. Optional `image.query` and `image.detail` parameters guide targeted fallback analysis. |
+| `write` | hashline.ts → lib/write.ts | **Overrides built-in.** Wraps `createWriteToolDefinition`, preserving native full-file writes and rendering. Successful writes return a fresh `[PATH#16HEXTAG]` computed from the committed content and record that content as seen. Complete numbered snapshots copied from `read` are stripped only after path, sequence, completeness, and live-tag validation; copied rewrites preserve BOM + EOL. |
 | `subagent` | subagent.ts | Runs an isolated in-memory pi agent session with focused read, shell, edit, codegraph, and web tools. Defaults to a peer model (the current model unless configured); dynamically exposes an `advisor` tier only when a separately configured different model is available. Delegated tasks state whether edits are authorized. Each call renders as a compact two-line task/status box and exports its full transcript to `%TEMP%\pi-subagent-<session-id>.jsonl`. |
 | `codegraph_explore` | codegraph.ts | Spawns `codegraph serve --mcp` (lazy, once per session), newline-delimited JSON-RPC 2.0. Always visible (no `.codegraph/` gating). Agent passes `projectPath` per call. |
 | `web_search` | web-search.ts | Exa public MCP (`https://mcp.exa.ai/mcp`), SSE transport parsed manually, zero deps. |
@@ -47,7 +50,7 @@ tsconfig.json      # noEmit; strict; NodeNext; types: ["node"]
   Don't prefix provider names (`exa_` was dropped; the provider is an impl detail).
 - **Override built-ins** by registering a tool with the same `name` (e.g. `bash`, `edit`).
   The TUI shows an override warning; that's expected.
-- **One extension per file**, `export default function (pi: ExtensionAPI) { ... }`. Use
+- **One top-level extension entry point per file**, `export default function (pi: ExtensionAPI) { ... }`. Use
   `pi.registerTool({ name, label, description, parameters: Type.Object({...}), ... })`.
 - **Module comments**: start every extension file with a JSDoc comment that summarizes
   the extension's purpose and important implementation behavior, before all imports.
@@ -97,5 +100,5 @@ If VS Code shows stale type errors after dependency changes:
 ## Platform
 
 Targets **Windows + PowerShell 7**. `bash.ts` hard-codes the pwsh path
-(`C:\Program Files\PowerShell\7\pwsh.exe`) and `edit.ts`/`codegraph.ts` are
+(`C:\Program Files\PowerShell\7\pwsh.exe`) and `lib/edit.ts`/`codegraph.ts` are
 cross-platform but untested elsewhere. Don't "fix" pwsh-isms to sh/bash.

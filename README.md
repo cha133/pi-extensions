@@ -7,9 +7,7 @@ A collection of [pi](https://pi.dev) coding-agent extensions.
 | `bash.ts` | **Overrides built-in `bash`** to run PowerShell 7 (`pwsh.exe`); injects `TERM=dumb` so the profile skips interactive init but keeps UTF-8 + mise |
 | `shell-guidance.ts` | Adds system-prompt guidance to use ripgrep for discovery/search and move non-trivial shell logic into temporary Bun scripts; registers no tool |
 | `session-info.ts` | Captures the first user message's date/time and selected model, then reuses those fixed values after model switches and resume |
-| `edit.ts` | **Overrides built-in `edit`** with compact, version-tagged hashline patches; one call validates multiple line-anchored `SWAP`, `CUT`, and `INS` hunks before one write |
-| `read.ts` | **Overrides built-in `read`** with numbered hashline text snapshots; images are automatically routed to the current model or a configured fallback vision model |
-| `write.ts` | **Overrides built-in `write`** while preserving its `path`/`content` interface; returns a fresh hashline tag and safely strips complete numbered snapshots copied from `read` |
+| `hashline.ts` | **Overrides built-in `read`, `edit`, and `write` together** with one shared session-grounding state: numbered snapshots, compact version-tagged patches, vision fallback, and safe full-file writes |
 | `subagent.ts` | `subagent` - delegates independent investigation, implementation, and review to an isolated tool-using peer or a configured higher-capability advisor |
 | `codegraph.ts` | `codegraph_explore` - bridges codegraph's MCP tool into a native pi tool (spawns `codegraph serve --mcp`, lazy, once per session) |
 | `web-search.ts` | `web_search`, `web_fetch` via Exa public MCP (`https://mcp.exa.ai/mcp`, no API key) |
@@ -22,7 +20,8 @@ pi install git:github.com/cha133/pi-extensions
 pi install /absolute/path/to/pi-extensions
 ```
 
-Or copy files from `extensions/` into `~/.pi/agent/extensions/` for auto-discovery and `/reload`.
+Or copy the complete `extensions/` tree, including `extensions/lib/`, into
+`~/.pi/agent/extensions/` for auto-discovery and `/reload`.
 
 ## Requirements
 
@@ -201,7 +200,8 @@ npm run typecheck
 
 ```
 pi-extensions/
-├── extensions/          # one extension per .ts file, loaded by pi (package manifest)
+├── extensions/          # top-level .ts extension entry points loaded by pi
+│   └── lib/             # non-discovered implementations shared by entry points
 ├── tests/               # Bun regression tests
 ├── package.json         # pi-package manifest + peerDeps (runtime) + devDeps (types/tsc)
 ├── tsconfig.json        # noEmit; strict; NodeNext; types: ["node"]

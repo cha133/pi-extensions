@@ -3,17 +3,16 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
-import registerEdit, {
+import {
 	applyHashlinePatch,
 	computeHashlineTag,
 	parseHashlinePatch,
-} from "../extensions/edit.ts";
-import {
-	recordCompleteHashlineContent,
-	recordHashlineRange,
-} from "../extensions/lib/hashline-state.ts";
+	registerEdit,
+} from "../extensions/lib/edit.ts";
+import { HashlineState } from "../extensions/lib/hashline-state.ts";
 
 const SESSION_ID = "edit-test-session";
+const state = new HashlineState();
 
 function patch(body, path = "example.txt", tag = "A1B2C3D4E5F60718") {
 	return `[${path}#${tag}]\n${body}`;
@@ -25,13 +24,13 @@ function registerDefinition() {
 		registerTool(tool) {
 			definition = tool;
 		},
-	});
+	}, state);
 	return definition;
 }
 
 function executionContext(directory, path, content) {
 	const absolutePath = resolve(directory, path);
-	recordCompleteHashlineContent(
+	state.recordComplete(
 		SESSION_ID,
 		absolutePath,
 		computeHashlineTag(content),
@@ -338,7 +337,7 @@ describe("edit registration and execution", () => {
 		const original = "one\ntwo\nthree\n";
 		await writeFile(path, original, "utf8");
 		const tag = computeHashlineTag(original);
-		recordHashlineRange(SESSION_ID, path, tag, 3, 1, 1);
+		state.recordRange(SESSION_ID, path, tag, 3, 1, 1);
 
 		try {
 			await expect(

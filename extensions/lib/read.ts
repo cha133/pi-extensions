@@ -33,12 +33,10 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import {
-	clearHashlineSession,
+	type HashlineState,
 	HASHLINE_TAG_LENGTH,
 	HASHLINE_TAG_PATTERN,
-	recordCompleteHashlineContent,
-	recordHashlineRange,
-} from "./lib/hashline-state.js";
+} from "./hashline-state.js";
 
 const HASHLINE_HEADER_RE = new RegExp(`^\\[(.+)#(${HASHLINE_TAG_PATTERN})\\]$`);
 
@@ -168,8 +166,9 @@ export async function restoreHashlineState(
 	entries: readonly SessionEntry[],
 	sessionId: string,
 	cwd: string,
+	state: HashlineState,
 ): Promise<number> {
-	clearHashlineSession(sessionId);
+	state.clearSession(sessionId);
 	const records = entries
 		.map(persistedGroundingFromEntry)
 		.filter((record): record is PersistedGrounding => record !== undefined);
@@ -195,7 +194,7 @@ export async function restoreHashlineState(
 		if (!live || live.tag !== record.tag) continue;
 
 		if (record.kind === "write" || live.lineCount === 0) {
-			recordCompleteHashlineContent(
+			state.recordComplete(
 				sessionId,
 				absolutePath,
 				record.tag,
@@ -205,7 +204,7 @@ export async function restoreHashlineState(
 			continue;
 		}
 		for (const line of record.lines) {
-			recordHashlineRange(sessionId, absolutePath, record.tag, live.lineCount, line, line);
+			state.recordRange(sessionId, absolutePath, record.tag, live.lineCount, line, line);
 		}
 		if (record.lines.length > 0) restored++;
 	}
@@ -450,17 +449,18 @@ async function describeImage(
 	}
 }
 
-export default function (pi: ExtensionAPI) {
+export function registerRead(pi: ExtensionAPI, state: HashlineState): void {
 	let registeredCwd: string | undefined;
 
 	pi.on("session_shutdown", (_event, ctx) => {
-		clearHashlineSession(ctx.sessionManager.getSessionId());
+		state.clearSession(ctx.sessionManager.getSessionId());
 	});
 	pi.on("session_tree", async (_event, ctx) => {
 		await restoreHashlineState(
 			ctx.sessionManager.getBranch(),
 			ctx.sessionManager.getSessionId(),
 			ctx.cwd,
+			state,
 		);
 	});
 
@@ -469,6 +469,7 @@ export default function (pi: ExtensionAPI) {
 			ctx.sessionManager.getBranch(),
 			ctx.sessionManager.getSessionId(),
 			ctx.cwd,
+			state,
 		);
 		if (registeredCwd === ctx.cwd) {
 			return;
@@ -546,7 +547,7 @@ export default function (pi: ExtensionAPI) {
 				const lineCount = splitFileLines(normalized).length;
 				const displayed = displayedHashlineRange(formatted);
 				if (displayed) {
-					recordHashlineRange(
+					state.recordRange(
 						toolCtx.sessionManager.getSessionId(),
 						absolutePath,
 						computeHashlineTag(normalized),
@@ -556,7 +557,7 @@ export default function (pi: ExtensionAPI) {
 					);
 				} else if (lineCount === 0) {
 					// Record the empty revision so INS.HEAD/INS.TAIL can initialize it.
-					recordCompleteHashlineContent(
+					state.recordComplete(
 						toolCtx.sessionManager.getSessionId(),
 						absolutePath,
 						computeHashlineTag(normalized),

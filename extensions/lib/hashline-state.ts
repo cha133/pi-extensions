@@ -18,12 +18,12 @@ interface Interval {
 	end: number;
 }
 
-interface RevisionCoverage {
+export interface RevisionCoverage {
 	lineCount: number;
 	intervals: Interval[];
 }
 
-const sessions = new Map<string, Map<string, Map<string, RevisionCoverage>>>();
+type SessionCoverage = Map<string, Map<string, Map<string, RevisionCoverage>>>;
 
 function pathKey(path: string): string {
 	const absolute = resolve(path);
@@ -31,6 +31,7 @@ function pathKey(path: string): string {
 }
 
 function revisionFor(
+	sessions: SessionCoverage,
 	sessionId: string,
 	path: string,
 	tag: string,
@@ -69,35 +70,35 @@ function mergeIntervals(intervals: Interval[]): Interval[] {
 	return merged;
 }
 
-export function recordHashlineRange(
-	sessionId: string,
-	path: string,
-	tag: string,
-	lineCount: number,
-	start: number,
-	end: number,
-): void {
-	if (start < 1 || end < start || end > lineCount) return;
-	const coverage = revisionFor(sessionId, path, tag, lineCount);
-	coverage.intervals = mergeIntervals([...coverage.intervals, { start, end }]);
-}
+/** Explicit state owned by the single hashline extension instance. */
+export class HashlineState {
+	private readonly sessions: SessionCoverage = new Map();
 
-export function recordCompleteHashlineContent(
-	sessionId: string,
-	path: string,
-	tag: string,
-	lineCount: number,
-): void {
-	const coverage = revisionFor(sessionId, path, tag, lineCount);
-	coverage.intervals = lineCount === 0 ? [] : [{ start: 1, end: lineCount }];
-}
+	recordRange(
+		sessionId: string,
+		path: string,
+		tag: string,
+		lineCount: number,
+		start: number,
+		end: number,
+	): void {
+		if (start < 1 || end < start || end > lineCount) return;
+		const coverage = revisionFor(this.sessions, sessionId, path, tag, lineCount);
+		coverage.intervals = mergeIntervals([...coverage.intervals, { start, end }]);
+	}
 
-export function getHashlineCoverage(
-	sessionId: string,
-	path: string,
-	tag: string,
-): RevisionCoverage | undefined {
-	return sessions.get(sessionId)?.get(pathKey(path))?.get(tag);
+	recordComplete(sessionId: string, path: string, tag: string, lineCount: number): void {
+		const coverage = revisionFor(this.sessions, sessionId, path, tag, lineCount);
+		coverage.intervals = lineCount === 0 ? [] : [{ start: 1, end: lineCount }];
+	}
+
+	getCoverage(sessionId: string, path: string, tag: string): RevisionCoverage | undefined {
+		return this.sessions.get(sessionId)?.get(pathKey(path))?.get(tag);
+	}
+
+	clearSession(sessionId: string): void {
+		this.sessions.delete(sessionId);
+	}
 }
 
 export function coversHashlineRange(
@@ -108,8 +109,4 @@ export function coversHashlineRange(
 	return coverage.intervals.some(
 		(interval) => interval.start <= start && interval.end >= end,
 	);
-}
-
-export function clearHashlineSession(sessionId: string): void {
-	sessions.delete(sessionId);
 }

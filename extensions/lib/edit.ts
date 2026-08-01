@@ -27,10 +27,11 @@ import { join, resolve } from "node:path";
 import { Type } from "typebox";
 import {
 	coversHashlineRange,
-	getHashlineCoverage,
+	type HashlineState,
 	HASHLINE_TAG_LENGTH,
 	HASHLINE_TAG_PATTERN,
-} from "./lib/hashline-state.js";
+	type RevisionCoverage,
+} from "./hashline-state.js";
 
 const editSchema = Type.Object({
 	input: Type.String({
@@ -358,7 +359,7 @@ function validateNoOverlap(edits: ConcreteEdit[]): void {
 
 function validateSeenHunks(
 	hunks: ParsedHunk[],
-	coverage: NonNullable<ReturnType<typeof getHashlineCoverage>>,
+	coverage: RevisionCoverage,
 ): void {
 	for (const hunk of hunks) {
 		if (hunk.kind === "swap" || hunk.kind === "cut") {
@@ -439,7 +440,7 @@ function pathFromInput(input: unknown): string {
 	return first ? HEADER_RE.exec(first.trim())?.[1] ?? "" : "";
 }
 
-export default function (pi: ExtensionAPI): void {
+export function registerEdit(pi: ExtensionAPI, state: HashlineState): void {
 	pi.registerTool({
 		name: "edit",
 		label: "edit",
@@ -530,7 +531,7 @@ export default function (pi: ExtensionAPI): void {
 					);
 				}
 				const newContent = applyHashlinePatch(content, parsed.hunks);
-				const coverage = getHashlineCoverage(sessionId, absolutePath, parsed.tag);
+				const coverage = state.getCoverage(sessionId, absolutePath, parsed.tag);
 				if (!coverage) {
 					throw new Error(
 						`No read coverage is recorded for ${parsed.path}#${parsed.tag}. Read the target lines in this session before editing them.`,
